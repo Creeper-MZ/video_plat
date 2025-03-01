@@ -2,6 +2,7 @@ import os
 import uuid
 import time
 import asyncio
+import json
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from enum import Enum
@@ -62,7 +63,9 @@ class ModelPrecision(str, Enum):
 
 class TaskStatus(str, Enum):
     QUEUED = "queued"
+    INITIALIZING = "initializing"  # 初始化模型阶段
     RUNNING = "running"
+    SAVING = "saving"  # 保存视频阶段
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -137,6 +140,10 @@ class TaskResponse(BaseModel):
     completed_at: Optional[datetime] = None
     output_url: Optional[str] = None
     error_message: Optional[str] = None
+    status_message: Optional[str] = None  # 添加状态消息
+    current_step: Optional[int] = None  # 当前步骤
+    total_steps: Optional[int] = None  # 总步骤数
+    estimated_time: Optional[int] = None  # 预计剩余时间(秒)
 
 
 # 队列管理
@@ -253,6 +260,47 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
+    # 读取进度文件获取最新状态（如果存在）
+    try:
+        progress_file = f"progress_{task_id}.json"
+        if os.path.exists(progress_file):
+            with open(progress_file, "r") as f:
+                progress_data = json.load(f)
+
+                # 更新任务状态
+                if progress_data.get("status") and progress_data["status"] != task.status:
+                    task.status = progress_data["status"]
+
+                # 更新进度
+                if "progress" in progress_data:
+                    task.progress = progress_data["progress"]
+
+                # 更新状态消息
+                if "status_message" in progress_data:
+                    task.status_message = progress_data["status_message"]
+
+                # 提交更新
+                db.commit()
+    except Exception as e:
+        print(f"读取进度文件失败: {e}")
+
+    # 计算预计时间
+    estimated_time = None
+    current_step = None
+    total_steps = task.steps
+
+    if task.progress > 0 and task.started_at and task.status in [TaskStatus.RUNNING, TaskStatus.INITIALIZING]:
+        elapsed_seconds = (datetime.utcnow() - task.started_at).total_seconds()
+        if task.progress > 0.05:  # 至少完成5%才计算
+            estimated_time = int((elapsed_seconds / task.progress) * (1 - task.progress))
+
+        current_step = int(task.progress * task.steps)
+
+    # 获取状态消息
+    status_message = task.status_message
+    if not status_message and task.additional_params and 'status_message' in task.additional_params:
+        status_message = task.additional_params.get('status_message')
+
     return TaskResponse(
         id=task.id,
         status=task.status,
@@ -262,7 +310,11 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
         started_at=task.started_at,
         completed_at=task.completed_at,
         output_url=f"/api/videos/{task_id}" if task.status == TaskStatus.COMPLETED else None,
-        error_message=task.error_message
+        error_message=task.error_message,
+        status_message=status_message,
+        current_step=current_step,
+        total_steps=total_steps,
+        estimated_time=estimated_time
     )
 
 
@@ -336,10 +388,70 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
     await websocket.accept()
     active_connections[task_id] = websocket
     try:
+        # 连接成功后，立即发送一次当前状态
+        db = SessionLocal()
+        task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
+        if task:
+            # 获取状态消息
+            status_message = task.status_message
+            if not status_message and task.additional_params and 'status_message' in task.additional_params:
+                status_message = task.additional_params.get('status_message')
+
+            # 计算预计时间
+            estimated_time = None
+            current_step = None
+
+            if task.progress > 0 and task.started_at and task.status in [TaskStatus.RUNNING, TaskStatus.INITIALIZING]:
+                elapsed_seconds = (datetime.utcnow() - task.started_at).total_seconds()
+                if task.progress > 0.05:  # 至少完成5%才计算
+                    estimated_time = int((elapsed_seconds / task.progress) * (1 - task.progress))
+
+                current_step = int(task.progress * task.steps)
+
+            # 发送初始状态
+            await websocket.send_json({
+                "status": task.status,
+                "progress": task.progress,
+                "status_message": status_message,
+                "current_step": current_step,
+                "total_steps": task.steps,
+                "estimated_time": estimated_time
+            })
+        db.close()
+
+        # 监听进度文件变化
+        last_mtime = 0
+        progress_file = f"progress_{task_id}.json"
+
         while True:
-            # 保持连接开启，等待消息发送
-            await websocket.receive_text()
-    except:
+            # 检查进度文件是否更新
+            try:
+                if os.path.exists(progress_file):
+                    mtime = os.path.getmtime(progress_file)
+                    if mtime > last_mtime:
+                        last_mtime = mtime
+                        with open(progress_file, "r") as f:
+                            progress_data = json.load(f)
+                            await websocket.send_json(progress_data)
+            except Exception as e:
+                print(f"读取进度文件失败: {e}")
+
+            # 接收客户端消息以保持连接活跃
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+                # 如果客户端发送了消息，可以在这里处理
+            except asyncio.TimeoutError:
+                # 超时，继续循环
+                pass
+            except Exception as e:
+                # 连接关闭或其他错误
+                break
+
+            # 休眠一小段时间，避免CPU占用过高
+            await asyncio.sleep(0.5)
+    except Exception as e:
+        print(f"WebSocket错误: {e}")
+    finally:
         # 连接关闭时移除
         if task_id in active_connections:
             del active_connections[task_id]

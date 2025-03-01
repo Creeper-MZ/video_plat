@@ -11,7 +11,12 @@ import {
   IconButton,
   Text,
   HStack,
+  VStack,
   Heading,
+  Progress,
+  Spinner,
+  Flex,
+  useColorModeValue,
   TableContainer
 } from '@chakra-ui/react';
 import { ViewIcon, DeleteIcon } from '@chakra-ui/icons';
@@ -40,7 +45,7 @@ const statusConfig = {
 };
 
 // 任务列表组件
-export const TasksList = ({ tasks, onSelectTask, onCancelTask, activeTaskId }) => {
+const TasksList = ({ tasks, onSelectTask, onCancelTask, activeTaskId }) => {
   // 处理任务类型显示
   const getTaskTypeLabel = (type) => {
     return type === 'text_to_video' ? '文生视频' : '图生视频';
@@ -49,7 +54,7 @@ export const TasksList = ({ tasks, onSelectTask, onCancelTask, activeTaskId }) =
   return (
     <Box>
       <Heading size="md" mb={4}>任务列表</Heading>
-      
+
       {tasks.length === 0 ? (
         <Text textAlign="center" py={8} color="gray.500">
           暂无任务记录
@@ -68,8 +73,8 @@ export const TasksList = ({ tasks, onSelectTask, onCancelTask, activeTaskId }) =
             </Thead>
             <Tbody>
               {tasks.map((task) => (
-                <Tr 
-                  key={task.id} 
+                <Tr
+                  key={task.id}
                   bg={task.id === activeTaskId ? "blue.50" : undefined}
                   _hover={{ bg: "gray.50" }}
                 >
@@ -111,5 +116,4 @@ export const TasksList = ({ tasks, onSelectTask, onCancelTask, activeTaskId }) =
     </Box>
   );
 };
-
 export default TasksList;

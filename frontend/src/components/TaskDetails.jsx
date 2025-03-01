@@ -48,32 +48,6 @@ const formatTime = (seconds) => {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 };
 
-// 阶段名称映射
-const stageNames = {
-  'initializing': '初始化',
-  'loading_models': '加载模型',
-  'encoding_prompt': '编码提示词',
-  'encoding_image': '编码图像',
-  'denoising': '视频生成',
-  'decoding': '解码视频',
-  'saving': '保存结果',
-  'completed': '已完成',
-  'failed': '失败'
-};
-
-// 阶段颜色映射
-const stageColors = {
-  'initializing': 'gray',
-  'loading_models': 'purple',
-  'encoding_prompt': 'cyan',
-  'encoding_image': 'teal',
-  'denoising': 'blue',
-  'decoding': 'green',
-  'saving': 'orange',
-  'completed': 'green',
-  'failed': 'red'
-};
-
 // 状态徽章配置
 const statusConfig = {
   queued: { color: 'yellow', label: '排队中' },
@@ -123,7 +97,7 @@ export const TaskDetails = ({ taskId, onCancelTask }) => {
 
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      // 更新任务状态
+      // 更新任务状态 - 直接使用服务器发送的原始数据
       setTask(prevTask => {
         if (!prevTask) return prevTask;
 
@@ -133,12 +107,9 @@ export const TaskDetails = ({ taskId, onCancelTask }) => {
           progress: data.progress !== undefined ? data.progress : prevTask.progress,
           error_message: data.error || prevTask.error_message,
           output_url: data.output_url || prevTask.output_url,
-          stage: data.stage || prevTask.stage,
-          stage_progress: data.stage_progress !== undefined ? data.stage_progress : prevTask.stage_progress,
-          eta: data.eta !== undefined ? data.eta : prevTask.eta,
           step: data.step !== undefined ? data.step : prevTask.step,
           total_steps: data.total_steps !== undefined ? data.total_steps : prevTask.total_steps,
-          logs: data.logs || prevTask.logs
+          eta: data.eta !== undefined ? data.eta : prevTask.eta
         };
       });
     };
@@ -160,8 +131,8 @@ export const TaskDetails = ({ taskId, onCancelTask }) => {
       fetchTaskDetails();
       initializeWebSocket();
 
-      // 定时刷新任务状态
-      const interval = setInterval(fetchTaskDetails, 3000);
+      // 定时刷新任务状态 - 保持较低频率，主要依赖WebSocket更新
+      const interval = setInterval(fetchTaskDetails, 5000);
 
       return () => {
         clearInterval(interval);
@@ -207,10 +178,6 @@ export const TaskDetails = ({ taskId, onCancelTask }) => {
   const statusLabel = statusConfig[task.status]?.label || task.status;
   const taskTypeLabel = task.type === 'text_to_video' ? '文本生成视频' : '图片生成视频';
 
-  // 当前阶段信息
-  const stageName = task.stage ? stageNames[task.stage] || task.stage : null;
-  const stageColor = task.stage ? stageColors[task.stage] || 'gray' : 'gray';
-
   return (
     <Box>
       <Heading size="md" mb={4}>任务详情</Heading>
@@ -223,43 +190,10 @@ export const TaskDetails = ({ taskId, onCancelTask }) => {
           <Text fontSize="sm">{taskTypeLabel}</Text>
         </HStack>
 
-        {task.stage && (
-          <Box>
-            <HStack justify="space-between" mb={1}>
-              <HStack>
-                <Text fontSize="sm">当前阶段:</Text>
-                <Badge colorScheme={stageColor}>{stageName}</Badge>
-              </HStack>
-              <Text fontSize="sm">
-                {task.step !== undefined && task.total_steps !== undefined
-                  ? `${task.step}/${task.total_steps}`
-                  : ''}
-              </Text>
-            </HStack>
-
-            <Progress
-              value={task.stage_progress !== undefined ? task.stage_progress * 100 : 0}
-              size="xs"
-              colorScheme={stageColor}
-              borderRadius="md"
-              hasStripe
-              isAnimated={task.status === 'running'}
-              mb={1}
-            />
-
-            <HStack justify="space-between" fontSize="xs" color="gray.500">
-              <Text>阶段进度: {Math.round((task.stage_progress || 0) * 100)}%</Text>
-              {task.eta !== undefined && (
-                <Text>预计剩余时间: {formatTime(task.eta)}</Text>
-              )}
-            </HStack>
-          </Box>
-        )}
-
         {(task.status === 'running' || task.status === 'queued') && (
           <Box>
             <HStack justify="space-between" mb={1}>
-              <Text fontSize="sm">总进度</Text>
+              <Text fontSize="sm">生成进度</Text>
               <Text fontSize="sm">{Math.round(task.progress * 100)}%</Text>
             </HStack>
             <Progress
@@ -267,9 +201,19 @@ export const TaskDetails = ({ taskId, onCancelTask }) => {
               size="sm"
               colorScheme="blue"
               borderRadius="md"
-              hasStripe
-              isAnimated={task.status === 'running'}
+              hasStripe={false}  // 移除条纹效果
+              isAnimated={false}  // 移除动画效果，显示真实进度
             />
+
+            {/* 显示步骤和ETA信息 */}
+            {task.step !== undefined && task.total_steps !== undefined && (
+              <HStack justify="space-between" fontSize="xs" color="gray.500" mt={1}>
+                <Text>步骤: {task.step}/{task.total_steps}</Text>
+                {task.eta !== undefined && (
+                  <Text>预计剩余时间: {Math.round(task.eta)}秒</Text>
+                )}
+              </HStack>
+            )}
           </Box>
         )}
 

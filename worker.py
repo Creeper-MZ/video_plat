@@ -34,73 +34,84 @@ running_task = None
 should_stop = False
 
 
-# 透明传递Pipeline进度的极简类
-class RawProgressTqdm:
+# 直接透明传递WanVideoPipeline进度的tqdm替代
+class RawTqdm:
+    """完全透明的进度传递，直接传递WanVideoPipeline的实际进度"""
+
     def __init__(self, iterable):
-        self.iterable = iterable
-        self.total = len(iterable)
+        self.iterable = list(iterable) if hasattr(iterable, '__len__') else list(iterable)
+        self.total = len(self.iterable)
         self.task_id = None
-
-    def __iter__(self):
-        current = 0
-        for item in self.iterable:
-            yield item
-            current += 1
-
-            # 直接计算原始进度
-            raw_progress = current / self.total
-
-            # 直接更新数据库
-            self._update_db(raw_progress, current, self.total)
+        self.last_log_time = time.time()
+        self.log_interval = 2  # 日志记录间隔（秒）
 
     def set_task_id(self, task_id):
         self.task_id = task_id
         return self
 
-    def _update_db(self, progress, current, total):
-        # 完全透明的进度更新
-        if not self.task_id:
-            return
+    def __iter__(self):
+        current = 0
+        start_time = time.time()
+        for item in self.iterable:
+            yield item
+            current += 1
 
+            # 计算纯粹的原始进度值
+            raw_progress = current / self.total
+
+            # 计算ETA
+            elapsed = time.time() - start_time
+            eta = elapsed / current * (self.total - current) if current > 0 else 0
+
+            # 记录日志
+            now = time.time()
+            if now - self.last_log_time >= self.log_interval or current == 1 or current == self.total:
+                logger.info(f"去噪进度: {current}/{self.total} ({raw_progress * 100:.1f}%) [ETA: {eta:.1f}s]")
+                self.last_log_time = now
+
+            # 原子化更新数据库和发送通知
+            if self.task_id:
+                asyncio.create_task(self._update_progress(raw_progress, current, self.total, eta))
+
+    async def _update_progress(self, progress, current, total, eta):
+        """更新进度到数据库并发送WebSocket通知"""
         try:
+            # 更新数据库
             db = SessionLocal()
-            task = db.query(VideoTask).filter(VideoTask.id == self.task_id).first()
-            if task:
-                # 直接设置原始进度，不做任何转换
-                task.progress = progress
+            try:
+                task = db.query(VideoTask).filter(VideoTask.id == self.task_id).first()
+                if task:
+                    # 直接更新原始进度值
+                    task.progress = progress
 
-                # 记录当前步骤
-                additional_info = task.additional_params or {}
-                additional_info["step"] = current
-                additional_info["total_steps"] = total
-                additional_info["logs"] = additional_info.get("logs", [])
-                if len(additional_info["logs"]) < 10:
-                    additional_info["logs"].append(f"去噪步骤: {current}/{total}")
-                task.additional_params = additional_info
+                    # 更新其他有用信息
+                    additional_info = task.additional_params or {}
+                    additional_info["step"] = current
+                    additional_info["total_steps"] = total
+                    additional_info["eta"] = eta
+                    task.additional_params = additional_info
 
-                db.commit()
+                    db.commit()
+            except Exception as e:
+                logger.error(f"更新数据库进度失败: {e}")
+            finally:
+                db.close()
 
-                # 通知websocket
-                asyncio.create_task(self._notify_progress(task.id, progress, current, total))
+            # 发送WebSocket通知
+            try:
+                from app import notify_client
+                await notify_client(self.task_id, {
+                    "status": "running",
+                    "progress": progress,  # 直接传递原始进度
+                    "step": current,
+                    "total_steps": total,
+                    "eta": eta
+                })
+            except Exception as e:
+                logger.error(f"发送WebSocket通知失败: {e}")
+
         except Exception as e:
-            logger.error(f"更新进度失败: {e}")
-        finally:
-            db.close()
-
-    async def _notify_progress(self, task_id, progress, current, total):
-        try:
-            # 导入通知函数
-            from app import notify_client
-
-            # 发送原始进度
-            await notify_client(task_id, {
-                "status": "running",
-                "progress": progress,  # 直接传递原始进度
-                "step": current,
-                "total_steps": total
-            })
-        except Exception as e:
-            logger.error(f"通知进度失败: {e}")
+            logger.error(f"进度更新失败: {e}")
 
 
 class GPUWorker:
@@ -118,7 +129,7 @@ class GPUWorker:
         try:
             # 导入依赖库
             from diffsynth import ModelManager
-            self.model_manager = ModelManager(device="cpu")
+            self.model_manager = ModelManager(device="cpu")  # 初始时加载到CPU
             logger.info(f"GPU Worker {self.gpu_id} 初始化完成")
         except Exception as e:
             logger.error(f"GPU Worker {self.gpu_id} 初始化失败: {e}")
@@ -226,27 +237,27 @@ class GPUWorker:
             # 更新任务状态为运行中
             task.status = TaskStatus.RUNNING
             task.started_at = datetime.utcnow()
-
-            # 进度设为0，等待实际Pipeline更新
-            task.progress = 0
-
-            # 只记录一些基本信息
-            additional_info = task.additional_params or {}
-            additional_info["gpu"] = f"GPU {self.gpu_id}"
-            additional_info["logs"] = ["开始处理..."]
-            task.additional_params = additional_info
+            task.progress = 0.0  # 初始进度为0
             db.commit()
 
-            # 加载模型 - 仅做日志，不影响进度
-            logger.info(f"开始加载模型，任务ID: {task.id}")
+            # 初始化通知
+            from app import notify_client
+            await notify_client(task.id, {
+                "status": "running",
+                "progress": 0.0,
+                "message": "开始加载模型"
+            })
+
+            # 加载模型
+            logger.info(f"开始加载模型: {task.id}")
             model_loaded = await self.load_model(task.type, task.resolution, task.model_precision)
             if not model_loaded:
                 raise Exception("模型加载失败")
 
-            # 计算尺寸
+            # 计算实际分辨率
             width, height = self._get_resolution_dimensions(task.resolution)
 
-            # 配置显存管理
+            # 设置显存管理配置
             num_persistent_param = None if not task.save_vram else 0
             self.current_pipeline.enable_vram_management(num_persistent_param_in_dit=num_persistent_param)
 
@@ -262,32 +273,30 @@ class GPUWorker:
                 "tiled": task.tiled,
             }
 
-            # 加载图片
+            # 如果是图生视频，加载输入图片
             if task.type == VideoType.IMAGE_TO_VIDEO and task.image_path:
                 input_image = Image.open(task.image_path)
                 generation_params["input_image"] = input_image
 
-            # 创建进度回调对象 - 只传递原始进度
-            tqdm_func = lambda x: RawProgressTqdm(x).set_task_id(task.id)
-            generation_params["progress_bar_cmd"] = tqdm_func
+            # 使用纯净的进度传递
+            generation_params["progress_bar_cmd"] = lambda x: RawTqdm(x).set_task_id(task.id)
 
             # 生成视频
-            logger.info(f"开始生成视频 任务ID: {task.id}")
+            logger.info(f"开始生成视频: {task.id}")
             video = self.current_pipeline(**generation_params)
 
             # 保存视频
-            logger.info(f"开始保存视频 任务ID: {task.id}")
+            logger.info(f"保存视频: {task.id}")
             from diffsynth import save_video
             save_video(video, task.output_path, fps=task.fps, quality=5)
 
-            # 更新任务状态
+            # 更新任务状态为完成
             task.status = TaskStatus.COMPLETED
-            task.progress = 1.0  # 最终进度为100%
+            task.progress = 1.0
             task.completed_at = datetime.utcnow()
             db.commit()
 
-            # 通知前端完成
-            from app import notify_client
+            # 完成通知
             await notify_client(task.id, {
                 "status": "completed",
                 "progress": 1.0,
@@ -298,22 +307,16 @@ class GPUWorker:
             self.current_pipeline = None
             torch.cuda.empty_cache()
 
-            logger.info(f"视频生成完成 任务ID: {task.id}")
+            logger.info(f"视频生成完成: {task.id}")
             return True
 
         except Exception as e:
-            logger.error(f"生成视频失败 任务ID: {task.id}, 错误: {e}")
+            logger.error(f"生成视频失败: {task.id}, 错误: {e}")
             task.status = TaskStatus.FAILED
             task.error_message = str(e)
-
-            # 添加错误信息
-            additional_info = task.additional_params or {}
-            additional_info["error"] = str(e)
-            task.additional_params = additional_info
-
             db.commit()
 
-            # 通知前端失败
+            # 失败通知
             from app import notify_client
             await notify_client(task.id, {
                 "status": "failed",
@@ -377,7 +380,7 @@ async def worker_main(gpu_id):
 
         except Exception as e:
             logger.error(f"Worker循环出错: {e}")
-            await asyncio.sleep(10)
+            await asyncio.sleep(10)  # 错误后等待更长时间
 
     logger.info(f"GPU Worker {gpu_id} 退出")
 

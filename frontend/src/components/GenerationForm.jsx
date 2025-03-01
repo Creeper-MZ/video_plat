@@ -8,6 +8,7 @@ import {
   Select,
   Button,
   Heading,
+  Divider,
   RadioGroup,
   Radio,
   Stack,
@@ -23,18 +24,14 @@ import {
   NumberDecrementStepper,
   Checkbox,
   Collapse,
-  InputGroup,
-  InputRightAddon,
-  useDisclosure,
-  VStack,
-  HStack,
-  Alert,
-  AlertIcon,
-  AlertTitle,
-  AlertDescription,
-  Image,
+  Flex,
+  IconButton,
   Text,
-  useToast
+  HStack,
+  VStack,
+  useDisclosure,
+  InputGroup,
+  InputRightAddon
 } from '@chakra-ui/react';
 import { ChevronDownIcon, ChevronUpIcon } from '@chakra-ui/icons';
 
@@ -55,8 +52,6 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
 
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState('');
-  const [formErrors, setFormErrors] = useState({});
-  const toast = useToast();
 
   const { isOpen: isAdvancedOpen, onToggle: onAdvancedToggle } = useDisclosure();
 
@@ -67,11 +62,6 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
       ...formData,
       [name]: type === 'checkbox' ? checked : value,
     });
-
-    // 清除该字段的错误
-    if (formErrors[name]) {
-      setFormErrors(prev => ({ ...prev, [name]: null }));
-    }
   };
 
   // 处理数值输入的变化
@@ -80,92 +70,24 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
       ...formData,
       [name]: value,
     });
-
-    // 清除该字段的错误
-    if (formErrors[name]) {
-      setFormErrors(prev => ({ ...prev, [name]: null }));
-    }
   };
 
   // 处理图片文件选择
   const handleImageChange = (e) => {
     const file = e.target.files[0];
-
     if (file) {
-      // 检查文件大小（限制为10MB）
-      if (file.size > 10 * 1024 * 1024) {
-        toast({
-          title: "文件过大",
-          description: "图片大小不能超过10MB",
-          status: "error",
-          duration: 5000,
-          isClosable: true,
-        });
-        return;
-      }
-
-      // 检查文件类型
-      const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-      if (!validTypes.includes(file.type)) {
-        toast({
-          title: "文件类型不支持",
-          description: "请上传JPG、PNG、WEBP或GIF格式的图片",
-          status: "error",
-          duration: 5000,
-          isClosable: true,
-        });
-        return;
-      }
-
       setImageFile(file);
       const reader = new FileReader();
       reader.onloadend = () => {
         setImagePreview(reader.result);
       };
       reader.readAsDataURL(file);
-
-      // 清除图片相关的错误
-      if (formErrors.image) {
-        setFormErrors(prev => ({ ...prev, image: null }));
-      }
     }
-  };
-
-  // 验证表单
-  const validateForm = () => {
-    const errors = {};
-
-    // 验证提示词
-    if (!formData.prompt.trim()) {
-      errors.prompt = "提示词不能为空";
-    } else if (formData.prompt.trim().length < 5) {
-      errors.prompt = "提示词太短，请提供更详细的描述";
-    }
-
-    // 如果是图生视频，验证是否上传了图片
-    if (formData.type === 'image_to_video' && !imageFile) {
-      errors.image = "请上传参考图片";
-    }
-
-    setFormErrors(errors);
-    return Object.keys(errors).length === 0;
   };
 
   // 处理表单提交
   const handleSubmit = (e) => {
     e.preventDefault();
-
-    // 表单验证
-    if (!validateForm()) {
-      toast({
-        title: "表单验证失败",
-        description: "请检查表单中的错误并修正",
-        status: "error",
-        duration: 5000,
-        isClosable: true,
-      });
-      return;
-    }
 
     const submitData = new FormData();
 
@@ -189,7 +111,7 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
     <Box as="form" onSubmit={handleSubmit}>
       <Heading size="md" mb={4}>创建新的视频生成任务</Heading>
 
-      <FormControl isRequired mb={4} isInvalid={formErrors.type}>
+      <FormControl isRequired mb={4}>
         <FormLabel>生成类型</FormLabel>
         <RadioGroup
           value={formData.type}
@@ -203,7 +125,7 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
       </FormControl>
 
       {formData.type === 'image_to_video' && (
-        <FormControl isRequired mb={4} isInvalid={formErrors.image}>
+        <FormControl isRequired mb={4}>
           <FormLabel>上传参考图片</FormLabel>
           <Input
             type="file"
@@ -211,45 +133,30 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
             onChange={handleImageChange}
             p={1}
           />
-          <FormHelperText>选择一张图片作为视频的起始参考（最大10MB）</FormHelperText>
-
-          {formErrors.image && (
-            <Alert status="error" mt={2} size="sm">
-              <AlertIcon />
-              {formErrors.image}
-            </Alert>
-          )}
+          <FormHelperText>选择一张图片作为视频的起始参考</FormHelperText>
 
           {imagePreview && (
             <Box mt={2} borderWidth={1} borderRadius="md" overflow="hidden">
-              <Image
+              <img
                 src={imagePreview}
                 alt="Preview"
-                maxH="200px"
-                maxW="100%"
-                objectFit="contain"
+                style={{ maxHeight: '200px', maxWidth: '100%', objectFit: 'contain' }}
               />
             </Box>
           )}
         </FormControl>
       )}
 
-      <FormControl isRequired mb={4} isInvalid={formErrors.prompt}>
+      <FormControl isRequired mb={4}>
         <FormLabel>提示词</FormLabel>
         <Textarea
           name="prompt"
           value={formData.prompt}
           onChange={handleChange}
-          placeholder="详细描述你想生成的视频内容..."
+          placeholder="描述你想生成的视频内容..."
           rows={4}
         />
         <FormHelperText>详细描述希望在视频中呈现的内容、风格和场景</FormHelperText>
-        {formErrors.prompt && (
-          <Alert status="error" mt={2} size="sm">
-            <AlertIcon />
-            {formErrors.prompt}
-          </Alert>
-        )}
       </FormControl>
 
       <FormControl mb={4}>

@@ -1,315 +1,327 @@
 import os
+import json
 import time
+import redis
+import requests
 import torch
-import signal
-import asyncio
 import logging
+import random
+import sys
 from PIL import Image
-from datetime import datetime
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from app import VideoTask, TaskStatus, VideoType, Resolution, ModelPrecision, Base
+import argparse
+from tqdm import tqdm
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("worker.log"),
-        logging.StreamHandler()
-    ]
+    format="[%(asctime)s] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# 数据库设置
-DATABASE_URL = "sqlite:///./video_generation.db"
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# 自定义进度条类，用于将进度发送到API
+class APIProgressBar(tqdm):
+    def __init__(self, *args, task_id=None, api_url=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.task_id = task_id
+        self.api_url = api_url
+        self.last_update_time = time.time()
 
-# 确保数据库表存在
-Base.metadata.create_all(bind=engine)
+    def update(self, n=1):
+        super().update(n)
+        current_time = time.time()
 
-# 全局变量
-running_task = None
-should_stop = False
-
-
-class GPUWorker:
-    def __init__(self, gpu_id):
-        self.gpu_id = gpu_id
-        self.device = f"cuda:{gpu_id}"
-        self.model_manager = None
-        self.current_pipeline = None
-        self.current_task = None
-
-    async def initialize(self):
-        logger.info(f"GPU Worker {self.gpu_id} 初始化中...")
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
-        try:
-            from diffsynth import ModelManager
-            self.model_manager = ModelManager(device="cpu")
-            logger.info(f"GPU Worker {self.gpu_id} 初始化完成")
-        except Exception as e:
-            logger.error(f"GPU Worker {self.gpu_id} 初始化失败: {e}")
-            raise e
-
-    async def load_model(self, model_type, resolution, precision):
-        logger.info(f"GPU Worker {self.gpu_id} 加载模型: {model_type}, {resolution}, {precision}")
-        try:
-            from diffsynth import WanVideoPipeline
-            model_path = None
-            if model_type == VideoType.TEXT_TO_VIDEO:
-                model_path = "/home/ps/videoGen/models/Wan2.1-T2V-14B/"
-            elif model_type == VideoType.IMAGE_TO_VIDEO:
-                if resolution in [Resolution.RESOLUTION_480P, Resolution.RESOLUTION_480P_VERTICAL]:
-                    model_path = "/home/ps/videoGen/models/Wan2.1-I2V-14B-480P/"
-                else:
-                    model_path = "/home/ps/videoGen/models/Wan2.1-I2V-14B-720P/"
-            if not model_path:
-                raise ValueError(f"无效的模型类型或分辨率: {model_type}, {resolution}")
-            torch_dtype = torch.bfloat16
-            if precision == ModelPrecision.FP8:
-                torch_dtype = torch.float8_e4m3fn
-            model_files = []
-            if model_type == VideoType.TEXT_TO_VIDEO:
-                model_files = [
-                    [
-                        f"{model_path}diffusion_pytorch_model-00001-of-00006.safetensors",
-                        f"{model_path}diffusion_pytorch_model-00002-of-00006.safetensors",
-                        f"{model_path}diffusion_pytorch_model-00003-of-00006.safetensors",
-                        f"{model_path}diffusion_pytorch_model-00004-of-00006.safetensors",
-                        f"{model_path}diffusion_pytorch_model-00005-of-00006.safetensors",
-                        f"{model_path}diffusion_pytorch_model-00006-of-00006.safetensors",
-                    ],
-                    f"{model_path}models_t5_umt5-xxl-enc-bf16.pth",
-                    f"{model_path}Wan2.1_VAE.pth"
-                ]
-            elif model_type == VideoType.IMAGE_TO_VIDEO:
-                if resolution in [Resolution.RESOLUTION_480P, Resolution.RESOLUTION_480P_VERTICAL]:
-                    model_files = [
-                        [
-                            f"{model_path}diffusion_pytorch_model-00001-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00002-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00003-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00004-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00005-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00006-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00007-of-00007.safetensors",
-                        ],
-                        f"{model_path}models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
-                        f"{model_path}models_t5_umt5-xxl-enc-bf16.pth",
-                        f"{model_path}Wan2.1_VAE.pth"
-                    ]
-                else:
-                    model_files = [
-                        [
-                            f"{model_path}diffusion_pytorch_model-00001-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00002-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00003-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00004-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00005-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00006-of-00007.safetensors",
-                            f"{model_path}diffusion_pytorch_model-00007-of-00007.safetensors",
-                        ],
-                        f"{model_path}models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
-                        f"{model_path}models_t5_umt5-xxl-enc-bf16.pth",
-                        f"{model_path}Wan2.1_VAE.pth"
-                    ]
-            self.model_manager.load_models(
-                model_files,
-                torch_dtype=torch_dtype,
-            )
-            self.current_pipeline = WanVideoPipeline.from_model_manager(
-                self.model_manager,
-                torch_dtype=torch.bfloat16,
-                device=self.device
-            )
-            logger.info(f"GPU Worker {self.gpu_id} 模型加载完成")
-            return True
-        except Exception as e:
-            logger.error(f"GPU Worker {self.gpu_id} 加载模型失败: {e}")
-            return False
-
-    async def process_task(self, task):
-        self.current_task = task
-        db = SessionLocal()
-        try:
-            # 开始任务，进度 0%
-            task.status = TaskStatus.RUNNING
-            task.started_at = datetime.utcnow()
-            task.progress = 0.0
-            db.commit()
-            from app import notify_client
-            await notify_client(task.id, {
-                "status": "running",
-                "progress": 0.0,
-                "message": "任务开始"
-            })
-
-            # 阶段 1: 模型加载和预处理 (0% - 10%)
-            logger.info(f"加载模型: {task.id}")
-            model_loaded = await self.load_model(task.type, task.resolution, task.model_precision)
-            if not model_loaded:
-                raise Exception("模型加载失败")
-            task.progress = 0.10
-            db.commit()
-            await notify_client(task.id, {
-                "status": "running",
-                "progress": 0.10,
-                "message": "模型加载和预处理完成"
-            })
-
-            # 准备生成参数
-            width, height = self._get_resolution_dimensions(task.resolution)
-            num_persistent_param = None if not task.save_vram else 0
-            self.current_pipeline.enable_vram_management(num_persistent_param_in_dit=num_persistent_param)
-            generation_params = {
-                "prompt": task.prompt,
-                "negative_prompt": task.negative_prompt,
-                "num_inference_steps": task.steps,
-                "height": height,
-                "width": width,
-                "num_frames": task.frames,
-                "seed": task.seed if task.seed >= 0 else None,
-                "tiled": task.tiled,
-            }
-            if task.type == VideoType.IMAGE_TO_VIDEO and task.image_path:
-                input_image = Image.open(task.image_path)
-                generation_params["input_image"] = input_image
-
-            # 阶段 2: 去噪过程 (10% - 80%)
-            def progress_callback(iterable):
-                total_steps = task.steps
-                for i, step in enumerate(iterable):
-                    # 去噪进度范围: 10% - 80%
-                    progress = 0.10 + (i / total_steps) * 0.70
-                    task.progress = progress
-                    db.commit()
-                    asyncio.run_coroutine_threadsafe(
-                        notify_client(task.id, {
-                            "status": "running",
+        # 限制更新频率（每0.5秒最多一次）
+        if current_time - self.last_update_time >= 0.5:
+            self.last_update_time = current_time
+            if self.task_id and self.api_url:
+                progress = self.n / self.total if self.total else 0
+                message = f"步骤 {self.n}/{self.total}"
+                try:
+                    requests.post(
+                        f"{self.api_url}/api/internal/update_task",
+                        json={
+                            "task_id": self.task_id,
+                            "status": "processing",
                             "progress": progress,
-                            "step": i + 1,
-                            "total_steps": total_steps,
-                            "message": f"去噪中: 第 {i + 1}/{total_steps} 步"
-                        }),
-                        asyncio.get_event_loop()
+                            "message": message
+                        }
                     )
-                    yield step
+                except Exception as e:
+                    logger.error(f"更新进度失败: {e}")
 
-            generation_params["progress_bar_cmd"] = progress_callback
-            logger.info(f"开始生成视频: {task.id}")
-            video = self.current_pipeline(**generation_params)
+# 检查任务是否被取消
+def check_if_cancelled(task_id, api_url):
+    try:
+        response = requests.get(f"{api_url}/api/internal/check_cancel/{task_id}")
+        if response.status_code == 200:
+            return response.json().get("cancelled", False)
+    except Exception as e:
+        logger.error(f"检查任务取消状态失败: {e}")
+    return False
 
-            # 阶段 3: 解码和后处理 (80% - 100%)
-            task.progress = 0.80
-            db.commit()
-            await notify_client(task.id, {
-                "status": "running",
-                "progress": 0.80,
-                "message": "去噪完成，正在后处理"
-            })
+def update_task_status(task_id, api_url, status, progress=None, message=None, output_path=None):
+    data = {
+        "task_id": task_id,
+        "status": status
+    }
 
-            logger.info(f"保存视频: {task.id}")
-            from diffsynth import save_video
-            save_video(video, task.output_path, fps=task.fps, quality=5)
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+    if progress is not None:
+        data["progress"] = progress
 
-            # 任务完成，进度 100%
-            task.status = TaskStatus.COMPLETED
-            task.progress = 1.0
-            task.completed_at = datetime.utcnow()
-            db.commit()
-            await notify_client(task.id, {
-                "status": "completed",
-                "progress": 1.0,
-                "output_url": f"/api/videos/{task.id}",
-                "message": "视频生成完成"
-            })
+    if message is not None:
+        data["message"] = message
 
-            self.current_pipeline = None
-            torch.cuda.empty_cache()
-            logger.info(f"视频生成完成: {task.id}")
-            return True
-        except Exception as e:
-            logger.error(f"生成视频失败: {task.id}, 错误: {e}")
-            task.status = TaskStatus.FAILED
-            task.error_message = str(e)
-            db.commit()
-            await notify_client(task.id, {
-                "status": "failed",
-                "error": str(e),
-                "message": "任务失败"
-            })
-            return False
-        finally:
-            db.close()
-            self.current_task = None
+    if output_path is not None:
+        data["output_path"] = output_path
 
-    def _get_resolution_dimensions(self, resolution):
-        if resolution == Resolution.RESOLUTION_720P:
-            return 1280, 720
-        elif resolution == Resolution.RESOLUTION_720P_VERTICAL:
-            return 720, 1280
-        elif resolution == Resolution.RESOLUTION_480P:
-            return 854, 480
-        elif resolution == Resolution.RESOLUTION_480P_VERTICAL:
-            return 480, 854
+    try:
+        requests.post(f"{api_url}/api/internal/update_task", json=data)
+    except Exception as e:
+        logger.error(f"更新任务状态失败: {e}")
+
+def generate_video(task, gpu_id, api_url):
+    task_id = task["task_id"]
+    task_type = task["task_type"]
+    prompt = task["prompt"]
+    negative_prompt = task["negative_prompt"]
+    resolution = task["resolution"]
+    num_frames = task["num_frames"]
+    fps = task["fps"]
+    num_inference_steps = task["num_inference_steps"]
+    fp8 = task["fp8"]
+    save_vram = task["save_vram"]
+    seed = task["seed"] if task["seed"] is not None else random.randint(0, 2147483647)
+    guidance_scale = task["guidance_scale"]
+    sample_shift = task["sample_shift"]
+    image_path = task.get("image_path")
+
+    # 更新任务状态
+    update_task_status(
+        task_id=task_id,
+        api_url=api_url,
+        status="processing",
+        progress=0.0,
+        message="准备环境和模型..."
+    )
+
+    output_file = f"outputs/{task_id}_output.mp4"
+
+    try:
+        # 设置环境变量
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+
+        # 导入wan相关模块（放在这里避免GPU冲突）
+        import torch
+        from diffsynth import ModelManager, WanVideoPipeline, save_video
+
+        # 解析分辨率
+        width, height = map(int, task["resolution"].split("x"))
+
+        # 确定模型路径
+        if task_type == "t2v":
+            model_path = "/home/ps/videoGen/models/Wan2.1-T2V-14B/"
+        elif task_type == "i2v":
+            if max(width, height) > 480:
+                model_path = "/home/ps/videoGen/models/Wan2.1-I2V-14B-720P/"
+            else:
+                model_path = "/home/ps/videoGen/models/Wan2.1-I2V-14B-480P/"
         else:
-            return 854, 480
+            raise ValueError(f"不支持的任务类型: {task_type}")
 
-    def stop_current_task(self):
-        if self.current_pipeline:
-            logger.info(f"尝试停止GPU {self.gpu_id}上的当前任务")
+        # 更新状态
+        update_task_status(
+            task_id=task_id,
+            api_url=api_url,
+            status="processing",
+            progress=0.05,
+            message=f"加载模型: {model_path}"
+        )
+
+        # 使用正确的torch数据类型
+        torch_dtype = torch.float8_e4m3fn if fp8 else torch.bfloat16
+
+        # 加载模型
+        model_manager = ModelManager(device="cpu")
+
+        if task_type == "t2v":
+            model_files = [
+                [
+                    f"{model_path}diffusion_pytorch_model-00001-of-00006.safetensors",
+                    f"{model_path}diffusion_pytorch_model-00002-of-00006.safetensors",
+                    f"{model_path}diffusion_pytorch_model-00003-of-00006.safetensors",
+                    f"{model_path}diffusion_pytorch_model-00004-of-00006.safetensors",
+                    f"{model_path}diffusion_pytorch_model-00005-of-00006.safetensors",
+                    f"{model_path}diffusion_pytorch_model-00006-of-00006.safetensors",
+                ],
+                f"{model_path}models_t5_umt5-xxl-enc-bf16.pth",
+                f"{model_path}Wan2.1_VAE.pth",
+            ]
+        else:  # i2v
+            model_files = [
+                [
+                    f"{model_path}diffusion_pytorch_model-00001-of-00007.safetensors",
+                    f"{model_path}diffusion_pytorch_model-00002-of-00007.safetensors",
+                    f"{model_path}diffusion_pytorch_model-00003-of-00007.safetensors",
+                    f"{model_path}diffusion_pytorch_model-00004-of-00007.safetensors",
+                    f"{model_path}diffusion_pytorch_model-00005-of-00007.safetensors",
+                    f"{model_path}diffusion_pytorch_model-00006-of-00007.safetensors",
+                    f"{model_path}diffusion_pytorch_model-00007-of-00007.safetensors",
+                ],
+                f"{model_path}models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
+                f"{model_path}models_t5_umt5-xxl-enc-bf16.pth",
+                f"{model_path}Wan2.1_VAE.pth",
+            ]
+
+        # 加载模型
+        update_task_status(
+            task_id=task_id,
+            api_url=api_url,
+            status="processing",
+            progress=0.1,
+            message="加载模型文件..."
+        )
+        model_manager.load_models(model_files, torch_dtype=torch_dtype)
+
+        # 创建pipeline
+        update_task_status(
+            task_id=task_id,
+            api_url=api_url,
+            status="processing",
+            progress=0.3,
+            message="准备生成pipeline..."
+        )
+        pipe = WanVideoPipeline.from_model_manager(model_manager, torch_dtype=torch.bfloat16, device="cuda")
+
+        # 配置显存管理
+        num_persistent_param = 0 if save_vram else None
+        pipe.enable_vram_management(num_persistent_param_in_dit=num_persistent_param)
+
+        # 创建进度条回调
+        progress_bar = APIProgressBar(
+            total=num_inference_steps,
+            task_id=task_id,
+            api_url=api_url,
+            desc="生成中"
+        )
+
+        # 准备图片（如果是I2V）
+        input_image = None
+        if task_type == "i2v" and image_path:
+            input_image = Image.open(image_path).convert("RGB")
+
+        # 开始生成
+        update_task_status(
+            task_id=task_id,
+            api_url=api_url,
+            status="processing",
+            progress=0.4,
+            message="开始生成视频..."
+        )
+
+        # 计算帧数（必须是4n+1）
+        adjusted_num_frames = ((num_frames - 1) // 4) * 4 + 1
+        if adjusted_num_frames != num_frames:
+            logger.info(f"调整帧数: {num_frames} -> {adjusted_num_frames}")
+            num_frames = adjusted_num_frames
+
+        # 生成视频
+        video = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            input_image=input_image,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            sigma_shift=sample_shift,
+            seed=seed,
+            tiled=True,
+            progress_bar_cmd=progress_bar,
+        )
+
+        # 保存视频
+        update_task_status(
+            task_id=task_id,
+            api_url=api_url,
+            status="processing",
+            progress=0.95,
+            message="保存视频..."
+        )
+        save_video(video, output_file, fps=fps, quality=5)
+
+        # 更新任务状态为完成
+        update_task_status(
+            task_id=task_id,
+            api_url=api_url,
+            status="completed",
+            progress=1.0,
+            message="视频生成完成",
+            output_path=f"/outputs/{task_id}_output.mp4"
+        )
+
         return True
 
+    except Exception as e:
+        logger.exception(f"生成视频失败: {e}")
+        update_task_status(
+            task_id=task_id,
+            api_url=api_url,
+            status="failed",
+            message=f"生成失败: {str(e)}"
+        )
+        return False
 
-async def worker_main(gpu_id):
-    global running_task, should_stop
-    worker = GPUWorker(gpu_id)
-    await worker.initialize()
-    logger.info(f"GPU Worker {gpu_id} 开始监听任务...")
-    while not should_stop:
+    finally:
+        # 清理临时文件
+        if image_path and os.path.exists(image_path):
+            try:
+                os.remove(image_path)
+            except:
+                pass
+
+        # 清理CUDA缓存
+        torch.cuda.empty_cache()
+
+def worker_main(gpu_id, api_url):
+    logger.info(f"Worker启动, 使用GPU: {gpu_id}")
+
+    # 连接到Redis
+    redis_client = redis.Redis(host="localhost", port=6379, db=0)
+
+    while True:
         try:
-            db = SessionLocal()
-            task = db.query(VideoTask).filter(
-                VideoTask.status == TaskStatus.RUNNING,
-                VideoTask.gpu_id == gpu_id
-            ).first()
-            if task:
-                running_task = task.id
-                logger.info(f"GPU {gpu_id} 开始处理任务 {task.id}")
-                await worker.process_task(task)
-                running_task = None
-            db.close()
-            await asyncio.sleep(5)
+            # 从队列中获取任务
+            task_data = redis_client.rpop("video_generation_queue")
+
+            if task_data:
+                task = json.loads(task_data)
+                task_id = task["task_id"]
+                logger.info(f"处理任务: {task_id}")
+
+                # 更新任务状态
+                update_task_status(
+                    task_id=task_id,
+                    api_url=api_url,
+                    status="processing",
+                    progress=0,
+                    message=f"在GPU #{gpu_id}上开始处理"
+                )
+
+                # 执行视频生成
+                generate_video(task, gpu_id, api_url)
+            else:
+                # 没有任务，休息一下
+                time.sleep(1)
+
         except Exception as e:
-            logger.error(f"Worker循环出错: {e}")
-            await asyncio.sleep(10)
-    logger.info(f"GPU Worker {gpu_id} 退出")
-
-
-def signal_handler(sig, frame):
-    global should_stop
-    logger.info("收到停止信号，准备优雅退出...")
-    should_stop = True
-
+            logger.exception(f"Worker异常: {e}")
+            time.sleep(5)  # 出错后休息一下再继续
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) < 2:
-        print("使用方法: python worker.py <gpu_id>")
-        sys.exit(1)
-    gpu_id = int(sys.argv[1])
-    if gpu_id not in [0, 1, 2, 3]:
-        print("GPU ID必须是0-3之间的整数")
-        sys.exit(1)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    try:
-        asyncio.run(worker_main(gpu_id))
-    except KeyboardInterrupt:
-        logger.info("收到Keyboard Interrupt，退出...")
-    except Exception as e:
-        logger.error(f"Worker主循环出错: {e}")
+    parser = argparse.ArgumentParser(description="视频生成Worker")
+    parser.add_argument("--gpu", type=int, required=True, help="GPU ID")
+    parser.add_argument("--api", type=str, default="http://localhost:8000", help="API URL")
+
+    args = parser.parse_args()
+    worker_main(args.gpu, args.api)

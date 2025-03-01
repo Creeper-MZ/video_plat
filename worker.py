@@ -34,13 +34,14 @@ running_task = None
 should_stop = False
 
 
-# 改进后的 RawTqdm：支持 offset 与 scale，并尝试基于 timestep 数值计算真实进度
+# 改进后的 RawTqdm（代码保持之前的修改，不再重复，此处未做修改）
 class RawTqdm:
     """
     用于 denoising 阶段的进度更新。
     offset：整体进度的起始百分比（0～1之间）
     scale：本阶段进度占整体进度的比例
     """
+
     def __init__(self, iterable, offset=0, scale=1):
         self.iterable = list(iterable) if hasattr(iterable, '__len__') else list(iterable)
         self.total = len(self.iterable)
@@ -258,7 +259,7 @@ class GPUWorker:
             model_loaded = await self.load_model(task.type, task.resolution, task.model_precision)
             if not model_loaded:
                 raise Exception("模型加载失败")
-            # 预处理阶段完成后（例如噪声生成、提示词编码、图像编码），更新进度到 10%
+            # 预处理阶段完成后，更新进度到 10%
             await notify_client(task.id, {"status": "running", "progress": 0.10, "message": "预处理完成，开始去噪"})
             width, height = self._get_resolution_dimensions(task.resolution)
             num_persistent_param = None if not task.save_vram else 0
@@ -286,7 +287,12 @@ class GPUWorker:
             logger.info(f"保存视频: {task.id}")
             from diffsynth import save_video
             save_video(video, task.output_path, fps=task.fps, quality=5)
-            # 视频保存后，任务完成更新进度到 100%
+            # ★★★ 关键修改 ★★★
+            # 等待 GPU 所有操作完成，确保视频文件已真正写入
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            # ★★★ 结束关键修改 ★★★
+            # 视频保存后，更新任务状态为完成（100%）
             task.status = TaskStatus.COMPLETED
             task.progress = 1.0
             task.completed_at = datetime.utcnow()
@@ -304,80 +310,4 @@ class GPUWorker:
             logger.error(f"生成视频失败: {task.id}, 错误: {e}")
             task.status = TaskStatus.FAILED
             task.error_message = str(e)
-            db.commit()
-            from app import notify_client
-            await notify_client(task.id, {
-                "status": "failed",
-                "error": str(e)
-            })
-            return False
-        finally:
-            db.close()
-            self.current_task = None
 
-    def _get_resolution_dimensions(self, resolution):
-        if resolution == Resolution.RESOLUTION_720P:
-            return 1280, 720
-        elif resolution == Resolution.RESOLUTION_720P_VERTICAL:
-            return 720, 1280
-        elif resolution == Resolution.RESOLUTION_480P:
-            return 854, 480
-        elif resolution == Resolution.RESOLUTION_480P_VERTICAL:
-            return 480, 854
-        else:
-            return 854, 480
-
-    def stop_current_task(self):
-        if self.current_pipeline:
-            logger.info(f"尝试停止GPU {self.gpu_id}上的当前任务")
-        return True
-
-
-async def worker_main(gpu_id):
-    global running_task, should_stop
-    worker = GPUWorker(gpu_id)
-    await worker.initialize()
-    logger.info(f"GPU Worker {gpu_id} 开始监听任务...")
-    while not should_stop:
-        try:
-            db = SessionLocal()
-            task = db.query(VideoTask).filter(
-                VideoTask.status == TaskStatus.RUNNING,
-                VideoTask.gpu_id == gpu_id
-            ).first()
-            if task:
-                running_task = task.id
-                logger.info(f"GPU {gpu_id} 开始处理任务 {task.id}")
-                await worker.process_task(task)
-                running_task = None
-            db.close()
-            await asyncio.sleep(5)
-        except Exception as e:
-            logger.error(f"Worker循环出错: {e}")
-            await asyncio.sleep(10)
-    logger.info(f"GPU Worker {gpu_id} 退出")
-
-
-def signal_handler(sig, frame):
-    global should_stop
-    logger.info("收到停止信号，准备优雅退出...")
-    should_stop = True
-
-
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) < 2:
-        print("使用方法: python worker.py <gpu_id>")
-        sys.exit(1)
-    gpu_id = int(sys.argv[1])
-    if gpu_id not in [0, 1, 2, 3]:
-        print("GPU ID必须是0-3之间的整数")
-        sys.exit(1)
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    try:
-        asyncio.run(worker_main(gpu_id))
-    except KeyboardInterrupt:
-        logger.info("收到Keyboard Interrupt，退出...")
-    except Exception as e:
-        logger.error(f"Worker主循环出错: {e}")

@@ -308,4 +308,5 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
     </Box>
   );
 };
+export { TaskDetails };
 export default TaskDetails;

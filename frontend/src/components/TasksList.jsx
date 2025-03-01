@@ -116,4 +116,5 @@ const TasksList = ({ tasks, onSelectTask, onCancelTask, activeTaskId }) => {
     </Box>
   );
 };
+export { TasksList };
 export default TasksList;

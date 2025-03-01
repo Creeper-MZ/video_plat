@@ -1,6 +1,7 @@
 import os
 import uuid
 import time
+import asyncio
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from enum import Enum
@@ -40,10 +41,12 @@ os.makedirs("outputs", exist_ok=True)
 # WebSocket连接管理
 active_connections: Dict[str, WebSocket] = {}
 
+
 # 枚举类型定义
 class VideoType(str, Enum):
     TEXT_TO_VIDEO = "text_to_video"
     IMAGE_TO_VIDEO = "image_to_video"
+
 
 class Resolution(str, Enum):
     RESOLUTION_720P = "720p"
@@ -51,9 +54,11 @@ class Resolution(str, Enum):
     RESOLUTION_480P = "480p"
     RESOLUTION_480P_VERTICAL = "480p_vertical"
 
+
 class ModelPrecision(str, Enum):
     FP16 = "fp16"
     FP8 = "fp8"
+
 
 class TaskStatus(str, Enum):
     QUEUED = "queued"
@@ -61,6 +66,7 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
 
 # 数据模型
 class VideoTask(Base):
@@ -90,8 +96,10 @@ class VideoTask(Base):
     additional_params = Column(JSON, nullable=True)
     user_id = Column(String, nullable=True)
 
+
 # 创建表
 Base.metadata.create_all(bind=engine)
+
 
 # 依赖项
 def get_db():
@@ -101,20 +109,23 @@ def get_db():
     finally:
         db.close()
 
+
 # 请求模型
 class VideoGenerationRequest(BaseModel):
     type: VideoType
     prompt: str
-    negative_prompt: Optional[str] = ""
-    resolution: Resolution = Resolution.RESOLUTION_720P
-    frames: int = Field(16, ge=8, le=128, description="视频帧数")
-    fps: int = Field(25, ge=10, le=60, description="视频帧率")
-    steps: int = Field(50, ge=20, le=150, description="推理步数")
+    negative_prompt: Optional[
+        str] = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+    resolution: Resolution = Resolution.RESOLUTION_480P
+    frames: int = Field(100, ge=8, le=128, description="视频帧数")
+    fps: int = Field(20, ge=10, le=60, description="视频帧率")
+    steps: int = Field(40, ge=20, le=60, description="推理步数")
     seed: int = Field(0, ge=-1, le=2147483647, description="随机种子，-1为随机")
-    model_precision: ModelPrecision = ModelPrecision.FP16
+    model_precision: ModelPrecision = ModelPrecision.FP8
     save_vram: bool = False
     tiled: bool = True
     additional_params: Optional[Dict[str, Any]] = None
+
 
 class TaskResponse(BaseModel):
     id: str
@@ -127,28 +138,30 @@ class TaskResponse(BaseModel):
     output_url: Optional[str] = None
     error_message: Optional[str] = None
 
+
 # 队列管理
 task_queue = []
 gpu_status = {0: False, 1: False, 2: False, 3: False}  # False means available
 
+
 # 路由定义
 @app.post("/api/tasks", response_model=TaskResponse)
 async def create_task(
-    background_tasks: BackgroundTasks,
-    params: VideoGenerationRequest = None,
-    image: Optional[UploadFile] = File(None),
-    prompt: Optional[str] = Form(None),
-    negative_prompt: Optional[str] = Form(None),
-    resolution: Optional[str] = Form(None),
-    frames: Optional[int] = Form(None),
-    fps: Optional[int] = Form(None),
-    steps: Optional[int] = Form(None),
-    seed: Optional[int] = Form(None),
-    model_precision: Optional[str] = Form(None),
-    save_vram: Optional[bool] = Form(None),
-    tiled: Optional[bool] = Form(None),
-    video_type: Optional[str] = Form(None),
-    db: Session = Depends(get_db)
+        background_tasks: BackgroundTasks,
+        params: VideoGenerationRequest = None,
+        image: Optional[UploadFile] = File(None),
+        prompt: Optional[str] = Form(None),
+        negative_prompt: Optional[str] = Form(None),
+        resolution: Optional[str] = Form(None),
+        frames: Optional[int] = Form(None),
+        fps: Optional[int] = Form(None),
+        steps: Optional[int] = Form(None),
+        seed: Optional[int] = Form(None),
+        model_precision: Optional[str] = Form(None),
+        save_vram: Optional[bool] = Form(None),
+        tiled: Optional[bool] = Form(None),
+        video_type: Optional[str] = Form(None),
+        db: Session = Depends(get_db)
 ):
     # 处理表单数据和JSON数据
     task_data = {}
@@ -233,6 +246,7 @@ async def create_task(
         output_url=f"/api/videos/{task_id}"
     )
 
+
 @app.get("/api/tasks/{task_id}", response_model=TaskResponse)
 def get_task(task_id: str, db: Session = Depends(get_db)):
     task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
@@ -251,20 +265,21 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
         error_message=task.error_message
     )
 
+
 @app.get("/api/tasks", response_model=List[TaskResponse])
 def list_tasks(
-    status: Optional[TaskStatus] = None,
-    limit: int = 10,
-    offset: int = 0,
-    db: Session = Depends(get_db)
+        status: Optional[TaskStatus] = None,
+        limit: int = 10,
+        offset: int = 0,
+        db: Session = Depends(get_db)
 ):
     query = db.query(VideoTask)
     if status:
         query = query.filter(VideoTask.status == status)
-    
+
     total = query.count()
     tasks = query.order_by(VideoTask.created_at.desc()).offset(offset).limit(limit).all()
-    
+
     return [
         TaskResponse(
             id=task.id,
@@ -280,38 +295,41 @@ def list_tasks(
         for task in tasks
     ]
 
+
 @app.delete("/api/tasks/{task_id}")
 def cancel_task(task_id: str, db: Session = Depends(get_db)):
     task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
-    
+
     if task.status in [TaskStatus.QUEUED, TaskStatus.RUNNING]:
         # 如果任务在队列中，从队列移除
         if task_id in task_queue:
             task_queue.remove(task_id)
-        
+
         # 如果任务正在运行，标记为取消
         if task.status == TaskStatus.RUNNING and task.gpu_id is not None:
             # 在这里你可能需要一个机制来通知GPU worker停止处理
             # 这里简化处理，直接释放GPU
             gpu_status[task.gpu_id] = False
-        
+
         task.status = TaskStatus.CANCELLED
         db.commit()
-        
+
         # 通知客户端
         notify_client(task_id, {"status": TaskStatus.CANCELLED})
-    
+
     return {"status": "success", "message": "任务已取消"}
+
 
 @app.get("/api/videos/{task_id}")
 def get_video(task_id: str, db: Session = Depends(get_db)):
     task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
     if not task or not task.output_path or task.status != TaskStatus.COMPLETED:
         raise HTTPException(status_code=404, detail="视频不存在或未完成生成")
-    
+
     return FileResponse(task.output_path, media_type="video/mp4", filename=f"{task_id}.mp4")
+
 
 @app.websocket("/ws/{task_id}")
 async def websocket_endpoint(websocket: WebSocket, task_id: str):
@@ -326,6 +344,7 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
         if task_id in active_connections:
             del active_connections[task_id]
 
+
 # 队列处理和GPU分配
 async def process_queue(db: Session):
     # 检查是否有可用GPU和等待中的任务
@@ -334,7 +353,7 @@ async def process_queue(db: Session):
             # 获取下一个任务
             task_id = task_queue[0]
             task_queue.remove(task_id)
-            
+
             # 更新任务状态
             task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
             if task and task.status == TaskStatus.QUEUED:
@@ -342,14 +361,15 @@ async def process_queue(db: Session):
                 task.started_at = datetime.utcnow()
                 task.gpu_id = gpu_id
                 db.commit()
-                
+
                 # 标记GPU为忙碌
                 gpu_status[gpu_id] = True
-                
+
                 # 启动视频生成过程
                 # 注意：实际实现中，这应该启动一个单独的进程或线程来处理
                 # 这里简化为一个函数调用
                 await run_video_generation(task_id, gpu_id, db)
+
 
 async def run_video_generation(task_id: str, gpu_id: int, db: Session):
     try:
@@ -357,7 +377,7 @@ async def run_video_generation(task_id: str, gpu_id: int, db: Session):
         task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
         if not task:
             return
-        
+
         # 模拟生成过程
         # 在实际项目中，这里应该调用Wan2.1的API进行视频生成
         # 这里仅做演示，用时间延迟模拟生成过程
@@ -367,32 +387,32 @@ async def run_video_generation(task_id: str, gpu_id: int, db: Session):
             task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
             if task.status == TaskStatus.CANCELLED:
                 break
-            
+
             # 更新进度
             progress = step / total_steps
             task.progress = progress
             db.commit()
-            
+
             # 通知客户端进度更新
             await notify_client(task_id, {"status": TaskStatus.RUNNING, "progress": progress})
-            
+
             # 模拟处理时间
             await asyncio.sleep(0.5)  # 在实际应用中，这会被实际处理时间替代
-        
+
         # 完成任务
         if task.status != TaskStatus.CANCELLED:
             task.status = TaskStatus.COMPLETED
             task.progress = 1.0
             task.completed_at = datetime.utcnow()
             db.commit()
-            
+
             # 通知客户端完成
             await notify_client(task_id, {
-                "status": TaskStatus.COMPLETED, 
+                "status": TaskStatus.COMPLETED,
                 "progress": 1.0,
                 "output_url": f"/api/videos/{task_id}"
             })
-        
+
     except Exception as e:
         # 处理错误
         task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
@@ -400,15 +420,16 @@ async def run_video_generation(task_id: str, gpu_id: int, db: Session):
             task.status = TaskStatus.FAILED
             task.error_message = str(e)
             db.commit()
-            
+
             # 通知客户端错误
             await notify_client(task_id, {"status": TaskStatus.FAILED, "error": str(e)})
-    
+
     finally:
         # 释放GPU
         gpu_status[gpu_id] = False
         # 处理队列中的下一个任务
         await process_queue(db)
+
 
 async def notify_client(task_id: str, data: dict):
     if task_id in active_connections:
@@ -418,10 +439,12 @@ async def notify_client(task_id: str, data: dict):
             # 如果发送失败，移除连接
             del active_connections[task_id]
 
+
 # 添加前端静态文件服务
 app.mount("/", StaticFiles(directory="frontend/build", html=True), name="static")
 
 # 主入口
 if __name__ == "__main__":
     import asyncio
+
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)

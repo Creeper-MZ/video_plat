@@ -8,6 +8,7 @@ import {
   Select,
   Button,
   Heading,
+  Divider,
   RadioGroup,
   Radio,
   Stack,
@@ -23,11 +24,14 @@ import {
   NumberDecrementStepper,
   Checkbox,
   Collapse,
-  InputGroup,
-  InputRightAddon,
-  useDisclosure,
-  VStack,
+  Flex,
+  IconButton,
+  Text,
   HStack,
+  VStack,
+  useDisclosure,
+  InputGroup,
+  InputRightAddon
 } from '@chakra-ui/react';
 import { ChevronDownIcon, ChevronUpIcon } from '@chakra-ui/icons';
 
@@ -35,20 +39,20 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
   const [formData, setFormData] = useState({
     type: 'text_to_video',
     prompt: '',
-    negative_prompt: '',
-    resolution: '720p',
-    frames: 16,
-    fps: 25,
-    steps: 50,
+    negative_prompt: '色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走',
+    resolution: '480p',
+    frames: 100,
+    fps: 20,
+    steps: 40,
     seed: 0,
-    model_precision: 'fp16',
+    model_precision: 'fp8',
     save_vram: false,
     tiled: true,
   });
-  
+
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState('');
-  
+
   const { isOpen: isAdvancedOpen, onToggle: onAdvancedToggle } = useDisclosure();
 
   // 处理表单字段变化
@@ -84,33 +88,33 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
   // 处理表单提交
   const handleSubmit = (e) => {
     e.preventDefault();
-    
+
     const submitData = new FormData();
-    
+
     // 添加所有表单字段
     for (const [key, value] of Object.entries(formData)) {
       submitData.append(key, value);
     }
-    
+
     // 添加视频类型
     submitData.append('video_type', formData.type);
-    
+
     // 如果是图生视频，添加图片文件
     if (formData.type === 'image_to_video' && imageFile) {
       submitData.append('image', imageFile);
     }
-    
+
     onSubmit(submitData);
   };
 
   return (
     <Box as="form" onSubmit={handleSubmit}>
       <Heading size="md" mb={4}>创建新的视频生成任务</Heading>
-      
+
       <FormControl isRequired mb={4}>
         <FormLabel>生成类型</FormLabel>
-        <RadioGroup 
-          value={formData.type} 
+        <RadioGroup
+          value={formData.type}
           onChange={(value) => handleChange({ target: { name: 'type', value } })}
         >
           <Stack direction="row">
@@ -119,7 +123,7 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
           </Stack>
         </RadioGroup>
       </FormControl>
-      
+
       {formData.type === 'image_to_video' && (
         <FormControl isRequired mb={4}>
           <FormLabel>上传参考图片</FormLabel>
@@ -130,19 +134,19 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
             p={1}
           />
           <FormHelperText>选择一张图片作为视频的起始参考</FormHelperText>
-          
+
           {imagePreview && (
             <Box mt={2} borderWidth={1} borderRadius="md" overflow="hidden">
-              <img 
-                src={imagePreview} 
-                alt="Preview" 
-                style={{ maxHeight: '200px', maxWidth: '100%', objectFit: 'contain' }} 
+              <img
+                src={imagePreview}
+                alt="Preview"
+                style={{ maxHeight: '200px', maxWidth: '100%', objectFit: 'contain' }}
               />
             </Box>
           )}
         </FormControl>
       )}
-      
+
       <FormControl isRequired mb={4}>
         <FormLabel>提示词</FormLabel>
         <Textarea
@@ -154,7 +158,7 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
         />
         <FormHelperText>详细描述希望在视频中呈现的内容、风格和场景</FormHelperText>
       </FormControl>
-      
+
       <FormControl mb={4}>
         <FormLabel>负面提示词</FormLabel>
         <Textarea
@@ -166,19 +170,19 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
         />
         <FormHelperText>描述需要避免的内容、风格或缺陷</FormHelperText>
       </FormControl>
-      
+
       <FormControl isRequired mb={4}>
         <FormLabel>分辨率</FormLabel>
         <Select name="resolution" value={formData.resolution} onChange={handleChange}>
-          <option value="720p">720P (1280×720)</option>
-          <option value="720p_vertical">720P 竖屏 (720×1280)</option>
           <option value="480p">480P (854×480)</option>
           <option value="480p_vertical">480P 竖屏 (480×854)</option>
+          <option value="720p">720P (1280×720)</option>
+          <option value="720p_vertical">720P 竖屏 (720×1280)</option>
         </Select>
       </FormControl>
-      
-      <Button 
-        rightIcon={isAdvancedOpen ? <ChevronUpIcon /> : <ChevronDownIcon />} 
+
+      <Button
+        rightIcon={isAdvancedOpen ? <ChevronUpIcon /> : <ChevronDownIcon />}
         onClick={onAdvancedToggle}
         variant="outline"
         mb={4}
@@ -186,14 +190,14 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
       >
         高级选项
       </Button>
-      
+
       <Collapse in={isAdvancedOpen} animateOpacity>
         <VStack spacing={4} p={4} bg="gray.50" borderRadius="md" align="stretch" mb={4}>
           <HStack spacing={6}>
             <FormControl>
               <FormLabel>视频帧数</FormLabel>
-              <NumberInput 
-                min={8} 
+              <NumberInput
+                min={8}
                 max={128}
                 value={formData.frames}
                 onChange={(_, value) => handleNumberChange('frames', value)}
@@ -206,11 +210,11 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
               </NumberInput>
               <FormHelperText>视频总帧数 (8-128)</FormHelperText>
             </FormControl>
-            
+
             <FormControl>
               <FormLabel>帧率 (FPS)</FormLabel>
-              <NumberInput 
-                min={10} 
+              <NumberInput
+                min={10}
                 max={60}
                 value={formData.fps}
                 onChange={(_, value) => handleNumberChange('fps', value)}
@@ -224,12 +228,12 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
               <FormHelperText>每秒帧数 (10-60)</FormHelperText>
             </FormControl>
           </HStack>
-          
+
           <FormControl>
             <FormLabel>推理步数: {formData.steps}</FormLabel>
-            <Slider 
-              min={20} 
-              max={150} 
+            <Slider
+              min={20}
+              max={60}
               step={1}
               value={formData.steps}
               onChange={(value) => handleNumberChange('steps', value)}
@@ -241,12 +245,12 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
             </Slider>
             <FormHelperText>增加步数可提高质量但会延长生成时间</FormHelperText>
           </FormControl>
-          
+
           <FormControl>
             <FormLabel>随机种子</FormLabel>
             <InputGroup>
-              <NumberInput 
-                min={-1} 
+              <NumberInput
+                min={-1}
                 max={2147483647}
                 value={formData.seed}
                 onChange={(_, value) => handleNumberChange('seed', value)}
@@ -259,8 +263,8 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
                 </NumberInputStepper>
               </NumberInput>
               <InputRightAddon>
-                <Button 
-                  size="xs" 
+                <Button
+                  size="xs"
                   onClick={() => handleNumberChange('seed', -1)}
                 >
                   随机
@@ -269,12 +273,12 @@ const GenerationForm = ({ onSubmit, isLoading }) => {
             </InputGroup>
             <FormHelperText>使用特定种子可以复现结果，使用-1表示随机种子</FormHelperText>
           </FormControl>
-          
+
           <FormControl>
             <FormLabel>模型精度</FormLabel>
             <Select name="model_precision" value={formData.model_precision} onChange={handleChange}>
-              <option value="fp16">FP16 (高精度)</option>
               <option value="fp8">FP8 (低精度，节省显存)</option>
+              <option value="fp16">FP16 (高精度)</option>
             </Select>
             <FormHelperText>FP8可以节省显存但可能降低质量</FormHelperText>
           </FormControl>

@@ -143,22 +143,20 @@ class GPUWorker:
             await notify_client(task.id, {
                 "status": "running",
                 "progress": 0.0,
-                "message": "任务开始，正在加载模型及预处理"
+                "message": "任务开始"
             })
 
             # 阶段 1: 模型加载和预处理 (0% - 10%)
-            logger.info(f"开始加载模型: {task.id}")
+            logger.info(f"加载模型: {task.id}")
             model_loaded = await self.load_model(task.type, task.resolution, task.model_precision)
             if not model_loaded:
                 raise Exception("模型加载失败")
-
-            # 更新进度到 10%
             task.progress = 0.10
             db.commit()
             await notify_client(task.id, {
                 "status": "running",
                 "progress": 0.10,
-                "message": "预处理完成，开始去噪"
+                "message": "模型加载和预处理完成"
             })
 
             # 准备生成参数
@@ -192,7 +190,8 @@ class GPUWorker:
                             "status": "running",
                             "progress": progress,
                             "step": i + 1,
-                            "total_steps": total_steps
+                            "total_steps": total_steps,
+                            "message": f"去噪中: 第 {i + 1}/{total_steps} 步"
                         }),
                         asyncio.get_event_loop()
                     )
@@ -225,7 +224,8 @@ class GPUWorker:
             await notify_client(task.id, {
                 "status": "completed",
                 "progress": 1.0,
-                "output_url": f"/api/videos/{task.id}"
+                "output_url": f"/api/videos/{task.id}",
+                "message": "视频生成完成"
             })
 
             self.current_pipeline = None
@@ -239,7 +239,8 @@ class GPUWorker:
             db.commit()
             await notify_client(task.id, {
                 "status": "failed",
-                "error": str(e)
+                "error": str(e),
+                "message": "任务失败"
             })
             return False
         finally:

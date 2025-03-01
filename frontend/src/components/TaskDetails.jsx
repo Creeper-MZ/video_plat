@@ -67,7 +67,7 @@ export const TaskDetails = ({ taskId, onCancelTask }) => {
         output_url: data.output_url || prevTask.output_url,
         step: data.step !== undefined ? data.step : prevTask.step,
         total_steps: data.total_steps !== undefined ? data.total_steps : prevTask.total_steps,
-        eta: data.eta !== undefined ? data.eta : prevTask.eta
+        message: data.message || prevTask.message
       }));
     };
 
@@ -134,9 +134,7 @@ export const TaskDetails = ({ taskId, onCancelTask }) => {
             {task.step !== undefined && task.total_steps !== undefined && (
               <HStack justify="space-between" fontSize="xs" color="gray.500" mt={1}>
                 <Text>步骤: {task.step}/{task.total_steps}</Text>
-                {task.eta !== undefined && (
-                  <Text>预计剩余时间: {Math.round(task.eta)}秒</Text>
-                )}
+                {task.message && <Text>{task.message}</Text>}
               </HStack>
             )}
           </Box>

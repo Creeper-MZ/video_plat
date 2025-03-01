@@ -23,15 +23,27 @@ logger = logging.getLogger(__name__)
 # 创建FastAPI应用
 app = FastAPI(title="Wan2.1视频生成平台")
 
+# 找到app.py中的CORS中间件配置并替换为以下代码
+
+from fastapi.middleware.cors import CORSMiddleware
+
 # 添加CORS中间件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # 允许所有源，生产环境中应限制为特定域名
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition", "Content-Type", "Content-Length"],
+    max_age=86400,  # 预检请求缓存1天
 )
 
+# 添加CORS测试端点
+@app.options("/api/cors-test")
+@app.get("/api/cors-test")
+def cors_test():
+    """测试CORS配置的端点"""
+    return {"status": "ok", "cors": "enabled"}
 # Redis连接
 redis_client = redis.Redis(host="localhost", port=6379, db=0)
 

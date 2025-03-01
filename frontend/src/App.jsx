@@ -3,7 +3,9 @@ import './App.css';
 import TaskCard from './TaskCard';
 import VideoPreview from './VideoPreview';
 
-const API_URL = 'http://localhost:8000';
+// 关键修复：动态API地址，适应不同主机环境
+const API_URL = window.location.protocol + '//' + window.location.hostname + ':8000';
+console.log('使用API地址:', API_URL);
 
 function App() {
     // 状态变量
@@ -36,9 +38,11 @@ function App() {
     // 获取所有任务
     const fetchTasks = async () => {
         try {
+            console.log('获取任务列表:', `${API_URL}/api/tasks`);
             const response = await fetch(`${API_URL}/api/tasks`);
             if (response.ok) {
                 const data = await response.json();
+                console.log('获取到任务:', data.length);
                 setTasks(data);
 
                 // 为新任务创建WebSocket连接
@@ -47,6 +51,8 @@ function App() {
                         connectWebSocket(task.task_id);
                     }
                 });
+            } else {
+                console.error('获取任务失败:', response.status, response.statusText);
             }
         } catch (err) {
             console.error('获取任务失败:', err);
@@ -57,8 +63,11 @@ function App() {
     const connectWebSocket = (taskId) => {
         if (websockets.current[taskId]) return;
 
+        // 修复：正确的WebSocket URL构建
         const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${wsProtocol}//${window.location.host}/ws/${taskId}`;
+        const wsUrl = `${wsProtocol}//${window.location.hostname}:8000/ws/${taskId}`;
+
+        console.log('连接WebSocket:', wsUrl);
 
         const ws = new WebSocket(wsUrl);
 
@@ -67,6 +76,7 @@ function App() {
         };
 
         ws.onmessage = (event) => {
+            console.log(`收到WebSocket消息: ${taskId}`, event.data);
             const data = JSON.parse(event.data);
 
             setTasks(prevTasks => {
@@ -186,18 +196,31 @@ function App() {
                 formData.append('image', selectedImage);
             }
 
+            // 增加调试日志
+            console.log('提交任务到:', `${API_URL}/api/generate`);
+            console.log('表单数据:', Object.fromEntries(formData.entries()));
+
             // 发送请求
             const response = await fetch(`${API_URL}/api/generate`, {
                 method: 'POST',
                 body: formData,
             });
 
+            console.log('响应状态:', response.status, response.statusText);
+
             if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.detail || '提交任务失败');
+                let errorDetail = '';
+                try {
+                    const errorData = await response.json();
+                    errorDetail = errorData.detail || '';
+                } catch (e) {
+                    errorDetail = await response.text() || '未知错误';
+                }
+                throw new Error(`提交任务失败: ${response.status} ${response.statusText} ${errorDetail}`);
             }
 
             const data = await response.json();
+            console.log('任务提交成功:', data);
 
             // 任务提交成功后刷新任务列表
             await fetchTasks();
@@ -215,6 +238,7 @@ function App() {
             setActiveTab('tasks');
 
         } catch (err) {
+            console.error('提交表单错误:', err);
             setError(err.message);
         } finally {
             setIsSubmitting(false);
@@ -224,16 +248,20 @@ function App() {
     // 取消任务
     const handleCancelTask = async (taskId) => {
         try {
+            console.log('取消任务:', taskId);
             const response = await fetch(`${API_URL}/api/tasks/${taskId}/cancel`, {
                 method: 'POST',
             });
 
             if (response.ok) {
+                console.log('任务取消成功');
                 // 取消请求成功后刷新任务列表
                 await fetchTasks();
+            } else {
+                console.error('取消任务失败:', response.status, response.statusText);
             }
         } catch (err) {
-            console.error('取消任务失败:', err);
+            console.error('取消任务错误:', err);
         }
     };
 
@@ -244,6 +272,7 @@ function App() {
 
     // 初始化和定期获取任务列表
     useEffect(() => {
+        console.log('初始化应用...');
         fetchTasks();
 
         // 每10秒更新任务列表
@@ -611,6 +640,7 @@ function App() {
             <footer className="bg-white border-t mt-12 py-6">
                 <div className="container mx-auto px-4 text-center text-gray-600 text-sm">
                     <p>Wan2.1 视频生成平台 &copy; {new Date().getFullYear()}</p>
+                    <p className="text-xs mt-1 text-gray-400">API地址: {API_URL}</p>
                 </div>
             </footer>
         </div>

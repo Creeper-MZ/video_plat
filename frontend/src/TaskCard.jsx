@@ -1,6 +1,9 @@
 import React, { useState } from 'react';
 import VideoPreview from './VideoPreview';
 
+// 获取API URL
+const API_URL = window.location.protocol + '//' + window.location.hostname + ':8000';
+
 const TaskCard = ({ task, onCancel }) => {
     const [showPreview, setShowPreview] = useState(false);
 
@@ -52,6 +55,19 @@ const TaskCard = ({ task, onCancel }) => {
     const handleClosePreview = () => {
         setShowPreview(false);
     };
+
+    // 处理输出路径
+    const getOutputPath = (path) => {
+        if (!path) return '';
+        // 确保路径以正确的URL开头
+        if (path.startsWith('/outputs/')) {
+            return `${API_URL}${path}`;
+        }
+        return path;
+    };
+
+    // 视频输出路径
+    const outputPath = getOutputPath(task.output_path);
 
     return (
         <div className="task-card border rounded-lg bg-white shadow-sm p-4 mb-4">
@@ -107,7 +123,7 @@ const TaskCard = ({ task, onCancel }) => {
                     </button>
                 )}
 
-                {task.status === 'completed' && task.output_path && (
+                {task.status === 'completed' && outputPath && (
                     <>
                         <button
                             onClick={handleOpenPreview}
@@ -116,8 +132,10 @@ const TaskCard = ({ task, onCancel }) => {
                             预览
                         </button>
                         <a
-                            href={task.output_path}
+                            href={outputPath}
                             download
+                            target="_blank"
+                            rel="noopener noreferrer"
                             className="text-green-500 hover:text-green-700 text-sm ml-2"
                         >
                             下载
@@ -126,9 +144,9 @@ const TaskCard = ({ task, onCancel }) => {
                 )}
             </div>
 
-            {showPreview && task.output_path && (
+            {showPreview && outputPath && (
                 <VideoPreview
-                    videoUrl={task.output_path}
+                    videoUrl={outputPath}
                     onClose={handleClosePreview}
                 />
             )}

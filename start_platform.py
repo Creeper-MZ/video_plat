@@ -71,7 +71,7 @@ def start_gpu_worker(gpu_id):
     env["PYTHONUNBUFFERED"] = "1"
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
-    cmd = [sys.executable, "gpu_worker.py", str(gpu_id)]
+    cmd = [sys.executable, "worker.py", str(gpu_id)]
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -213,7 +213,7 @@ def verify_environment():
         logger.warning("检查GPU状态失败!")
 
     # 检查必要的文件和目录
-    required_files = ["app.py", "gpu_worker.py"]
+    required_files = ["app.py", "worker.py"]
     for file in required_files:
         if not Path(file).exists():
             logger.error(f"缺少必要文件: {file}")

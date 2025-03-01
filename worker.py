@@ -34,15 +34,21 @@ running_task = None
 should_stop = False
 
 
-# 修改后的 RawTqdm：根据传入的 timestep 数值计算进度（如果可解析），否则回退到按迭代次数计算
+# 改进后的 RawTqdm：支持 offset 与 scale，并尝试基于 timestep 数值计算真实进度
 class RawTqdm:
-    """完全透明的进度传递，同步更新进度，并根据 timestep 数值计算进度百分比"""
-    def __init__(self, iterable):
+    """
+    用于 denoising 阶段的进度更新。
+    offset：整体进度的起始百分比（0～1之间）
+    scale：本阶段进度占整体进度的比例
+    """
+    def __init__(self, iterable, offset=0, scale=1):
         self.iterable = list(iterable) if hasattr(iterable, '__len__') else list(iterable)
         self.total = len(self.iterable)
         self.task_id = None
         self.last_log_time = time.time()
         self.log_interval = 2  # 日志记录间隔（秒）
+        self.offset = offset
+        self.scale = scale
         self.first_value = None
         self.last_value = None
         # 尝试解析 iterable 中的第一个和最后一个 timestep 数值
@@ -73,34 +79,36 @@ class RawTqdm:
             yield item
             current_index += 1
 
-            # 尝试根据 timestep 数值计算进度
-            progress = current_index / self.total  # 默认值
+            # 计算 denoising 阶段进度（0~1）
+            p = current_index / self.total  # 默认线性进度
             if self.first_value is not None and self.last_value is not None:
                 try:
                     if hasattr(item, 'item'):
                         current_val = float(item.item())
                     else:
                         current_val = float(item)
-                    # 假设 timesteps 为降序排列：初始值大，最终值小
-                    progress = (self.first_value - current_val) / (self.first_value - self.last_value)
-                    progress = max(0, min(progress, 1))
+                    # 假设 timesteps 为降序排列
+                    p = (self.first_value - current_val) / (self.first_value - self.last_value)
+                    p = max(0, min(p, 1))
                 except Exception as e:
                     logger.error(f"计算进度时出错: {e}")
+
+            # 将 denoising 进度映射到整体进度区间
+            overall_progress = self.offset + self.scale * p
 
             elapsed = time.time() - start_time
             eta = elapsed / current_index * (self.total - current_index) if current_index > 0 else 0
 
             now = time.time()
             if now - self.last_log_time >= self.log_interval or current_index == 1 or current_index == self.total:
-                logger.info(f"去噪进度: {current_index}/{self.total} ({progress * 100:.1f}%) [ETA: {eta:.1f}s]")
+                logger.info(f"去噪进度: {current_index}/{self.total} ({overall_progress * 100:.1f}%) [ETA: {eta:.1f}s]")
                 self.last_log_time = now
 
             if self.task_id:
-                self.update_progress_sync(progress, current_index, self.total, eta)
+                self.update_progress_sync(overall_progress, current_index, self.total, eta)
 
     def update_progress_sync(self, progress, current, total, eta):
         try:
-            # 更新数据库中的进度
             db = SessionLocal()
             try:
                 task = db.query(VideoTask).filter(VideoTask.id == self.task_id).first()
@@ -116,7 +124,6 @@ class RawTqdm:
                 logger.error(f"更新数据库进度失败: {e}")
             finally:
                 db.close()
-            # 同步发送 WebSocket 通知
             try:
                 from app import notify_client
                 loop = asyncio.new_event_loop()
@@ -148,7 +155,7 @@ class GPUWorker:
         os.environ["CUDA_VISIBLE_DEVICES"] = str(self.gpu_id)
         try:
             from diffsynth import ModelManager
-            self.model_manager = ModelManager(device="cpu")  # 初始时加载到CPU
+            self.model_manager = ModelManager(device="cpu")
             logger.info(f"GPU Worker {self.gpu_id} 初始化完成")
         except Exception as e:
             logger.error(f"GPU Worker {self.gpu_id} 初始化失败: {e}")
@@ -236,6 +243,7 @@ class GPUWorker:
         self.current_task = task
         db = SessionLocal()
         try:
+            # 更新任务状态为运行中，初始进度 0%
             task.status = TaskStatus.RUNNING
             task.started_at = datetime.utcnow()
             task.progress = 0.0
@@ -244,12 +252,14 @@ class GPUWorker:
             await notify_client(task.id, {
                 "status": "running",
                 "progress": 0.0,
-                "message": "开始加载模型"
+                "message": "任务开始，正在加载模型及预处理"
             })
             logger.info(f"开始加载模型: {task.id}")
             model_loaded = await self.load_model(task.type, task.resolution, task.model_precision)
             if not model_loaded:
                 raise Exception("模型加载失败")
+            # 预处理阶段完成后（例如噪声生成、提示词编码、图像编码），更新进度到 10%
+            await notify_client(task.id, {"status": "running", "progress": 0.10, "message": "预处理完成，开始去噪"})
             width, height = self._get_resolution_dimensions(task.resolution)
             num_persistent_param = None if not task.save_vram else 0
             self.current_pipeline.enable_vram_management(num_persistent_param_in_dit=num_persistent_param)
@@ -267,12 +277,16 @@ class GPUWorker:
                 from PIL import Image
                 input_image = Image.open(task.image_path)
                 generation_params["input_image"] = input_image
-            generation_params["progress_bar_cmd"] = lambda x: RawTqdm(x).set_task_id(task.id)
+            # 传入自定义 progress_bar_cmd，将 denoising 阶段进度映射到 10%-80%
+            generation_params["progress_bar_cmd"] = lambda x: RawTqdm(x, offset=0.10, scale=0.70).set_task_id(task.id)
             logger.info(f"开始生成视频: {task.id}")
             video = self.current_pipeline(**generation_params)
+            # 去噪及解码完成后，更新进度到 80%
+            await notify_client(task.id, {"status": "running", "progress": 0.80, "message": "去噪完成，正在后处理"})
             logger.info(f"保存视频: {task.id}")
             from diffsynth import save_video
             save_video(video, task.output_path, fps=task.fps, quality=5)
+            # 视频保存后，任务完成更新进度到 100%
             task.status = TaskStatus.COMPLETED
             task.progress = 1.0
             task.completed_at = datetime.utcnow()

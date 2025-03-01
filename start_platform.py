@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 视频生成平台启动脚本
-用法: python start_service.py [--port PORT] [--gpus GPU_IDS]
+用法: python start_platform.py [--port PORT] [--gpus GPU_IDS]
 """
 
 import os

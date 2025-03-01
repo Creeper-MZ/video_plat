@@ -1,58 +1,95 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  ChakraProvider, 
-  Box, 
-  Flex, 
-  Heading, 
-  Text, 
-  Tabs, 
-  TabList, 
-  TabPanels, 
-  Tab, 
+  ChakraProvider,
+  Box,
+  Flex,
+  Heading,
+  Text,
+  Tabs,
+  TabList,
+  TabPanels,
+  Tab,
   TabPanel,
   Container,
+  Button,
+  Badge,
+  HStack,
   useToast,
   Alert,
   AlertIcon,
   AlertTitle,
   AlertDescription,
-  CloseButton
+  Spinner,
+  useColorModeValue,
+  theme
 } from '@chakra-ui/react';
 import GenerationForm from './components/GenerationForm';
 import TasksList from './components/TasksList';
-import { TaskDetails } from './components/TaskDetails';
-import ErrorBoundary from './components/ErrorBoundary';
+import TaskDetails from './components/TaskDetails';
 
 const App = () => {
   const [activeTask, setActiveTask] = useState(null);
   const [tasks, setTasks] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState(null);
+  const [isLoadingTasks, setIsLoadingTasks] = useState(true);
+  const [systemStatus, setSystemStatus] = useState(null);
+  const [error, setError] = useState(null);
+  const [activeTabIndex, setActiveTabIndex] = useState(0);
   const toast = useToast();
 
   // 加载任务列表
   const fetchTasks = async () => {
     try {
+      setIsLoadingTasks(true);
       const response = await fetch('/api/tasks');
       if (response.ok) {
         const data = await response.json();
         setTasks(data);
+        setError(null);
+      } else {
+        throw new Error('获取任务列表失败');
       }
     } catch (error) {
       console.error('获取任务列表失败:', error);
+      setError('加载任务失败，请刷新页面重试');
+    } finally {
+      setIsLoadingTasks(false);
+    }
+  };
+
+  // 加载系统状态
+  const fetchSystemStatus = async () => {
+    try {
+      const response = await fetch('/api/system/status');
+      if (response.ok) {
+        const data = await response.json();
+        setSystemStatus(data);
+      }
+    } catch (error) {
+      console.error('获取系统状态失败:', error);
     }
   };
 
   // 初始加载和定时刷新
   useEffect(() => {
+    // 初始加载
     fetchTasks();
+    fetchSystemStatus();
 
     // 定时刷新任务列表
-    const interval = setInterval(() => {
+    const tasksInterval = setInterval(() => {
       fetchTasks();
     }, 5000);
 
-    return () => clearInterval(interval);
+    // 定时刷新系统状态
+    const statusInterval = setInterval(() => {
+      fetchSystemStatus();
+    }, 10000);
+
+    return () => {
+      clearInterval(tasksInterval);
+      clearInterval(statusInterval);
+    };
   }, []);
 
   // 提交新任务
@@ -76,8 +113,9 @@ const App = () => {
         });
 
         // 刷新任务列表并显示新任务详情
-        fetchTasks();
+        await fetchTasks();
         setActiveTask(result.id);
+        setActiveTabIndex(1); // 切换到任务列表标签页
       } else {
         const error = await response.json();
         throw new Error(error.detail || '创建任务失败');
@@ -124,90 +162,116 @@ const App = () => {
     }
   };
 
+  // 渲染系统状态信息
+  const renderSystemStatus = () => {
+    if (!systemStatus) return null;
+
+    const { total_gpus, busy_gpus, queue_length } = systemStatus;
+
+    return (
+      <HStack spacing={4} my={2}>
+        <Badge colorScheme="purple">{total_gpus}个GPU</Badge>
+        <Badge colorScheme={busy_gpus === total_gpus ? "red" : "green"}>
+          {busy_gpus}个工作中
+        </Badge>
+        <Badge colorScheme={queue_length > 0 ? "yellow" : "gray"}>
+          队列长度: {queue_length}
+        </Badge>
+      </HStack>
+    );
+  };
+
   return (
-    <ChakraProvider>
-      <ErrorBoundary>
-        <Box bg="gray.50" minH="100vh">
-          <Box bg="blue.600" color="white" p={4} shadow="md">
-            <Container maxW="container.xl">
-              <Heading size="lg">视频生成平台</Heading>
-              <Text mt={1}>基于Wan2.1的文生视频与图生视频系统</Text>
-            </Container>
-          </Box>
+    <ChakraProvider theme={theme}>
+      <Box bg="gray.50" minH="100vh">
+        <Box bg="blue.600" color="white" p={4} shadow="md">
+          <Container maxW="container.xl">
+            <Heading size="lg">视频生成平台</Heading>
+            <Text mt={1}>基于Wan2.1的文生视频与图生视频系统</Text>
+            {renderSystemStatus()}
+          </Container>
+        </Box>
 
-          <Container maxW="container.xl" py={6}>
-            {errorMessage && (
-              <Alert status="error" mb={4}>
-                <AlertIcon />
-                <AlertTitle mr={2}>发生错误!</AlertTitle>
-                <AlertDescription>{errorMessage}</AlertDescription>
-                <CloseButton
-                  position="absolute"
-                  right="8px"
-                  top="8px"
-                  onClick={() => setErrorMessage(null)}
-                />
-              </Alert>
-            )}
+        <Container maxW="container.xl" py={6}>
+          {error && (
+            <Alert status="error" mb={4}>
+              <AlertIcon />
+              <AlertTitle mr={2}>错误</AlertTitle>
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
 
-            <Flex direction={{ base: 'column', lg: 'row' }} gap={6}>
-              <Box flex="1" bg="white" p={5} borderRadius="md" shadow="sm">
-                <Tabs isFitted colorScheme="blue">
-                  <TabList>
-                    <Tab>创建任务</Tab>
-                    <Tab>任务列表</Tab>
-                  </TabList>
+          <Flex direction={{ base: 'column', lg: 'row' }} gap={6}>
+            <Box flex="1" bg="white" p={5} borderRadius="md" shadow="sm">
+              <Tabs
+                isFitted
+                colorScheme="blue"
+                index={activeTabIndex}
+                onChange={(index) => setActiveTabIndex(index)}
+              >
+                <TabList>
+                  <Tab>创建任务</Tab>
+                  <Tab>任务列表 {tasks.length > 0 && `(${tasks.length})`}</Tab>
+                </TabList>
 
-                  <TabPanels>
-                    <TabPanel>
-                      <GenerationForm
-                        onSubmit={handleSubmit}
-                        isLoading={isLoading}
-                      />
-                    </TabPanel>
-                    <TabPanel>
+                <TabPanels>
+                  <TabPanel>
+                    <GenerationForm
+                      onSubmit={handleSubmit}
+                      isLoading={isLoading}
+                    />
+                  </TabPanel>
+                  <TabPanel>
+                    {isLoadingTasks ? (
+                      <Flex justify="center" align="center" height="200px">
+                        <Spinner size="xl" />
+                      </Flex>
+                    ) : (
                       <TasksList
                         tasks={tasks}
                         onSelectTask={(taskId) => {
-                          try {
-                            setActiveTask(taskId);
-                          } catch (err) {
-                            console.error("选择任务时出错:", err);
-                            setErrorMessage("显示任务详情时发生错误，请刷新页面重试");
+                          setActiveTask(taskId);
+                          // 在移动设备上，任务详情会显示在下方，需要滚动到可见区域
+                          if (window.innerWidth < 992) {
+                            setTimeout(() => {
+                              document.getElementById('task-details-section')?.scrollIntoView({
+                                behavior: 'smooth'
+                              });
+                            }, 100);
                           }
                         }}
                         onCancelTask={handleCancelTask}
                         activeTaskId={activeTask}
                       />
-                    </TabPanel>
-                  </TabPanels>
-                </Tabs>
-              </Box>
+                    )}
+                  </TabPanel>
+                </TabPanels>
+              </Tabs>
+            </Box>
 
-              {activeTask && (
-                <Box
-                  w={{ base: '100%', lg: '500px' }}
-                  bg="white"
-                  p={5}
-                  borderRadius="md"
-                  shadow="sm"
-                >
-                  <ErrorBoundary>
-                    <TaskDetails
-                      taskId={activeTask}
-                      onCancelTask={handleCancelTask}
-                      onError={(err) => {
-                        console.error("任务详情组件错误:", err);
-                        setErrorMessage("显示任务详情时出错: " + (err.message || "未知错误"));
-                      }}
-                    />
-                  </ErrorBoundary>
-                </Box>
-              )}
-            </Flex>
-          </Container>
-        </Box>
-      </ErrorBoundary>
+            {activeTask && (
+              <Box
+                id="task-details-section"
+                w={{ base: '100%', lg: '500px' }}
+                bg="white"
+                p={5}
+                borderRadius="md"
+                shadow="sm"
+              >
+                <TaskDetails
+                  taskId={activeTask}
+                  onCancelTask={handleCancelTask}
+                />
+              </Box>
+            )}
+          </Flex>
+
+          <Box mt={10} textAlign="center" fontSize="sm" color="gray.500">
+            <Text>视频生成平台 &copy; {new Date().getFullYear()}</Text>
+            <Text mt={1}>基于Wan2.1模型 | 支持文生视频和图生视频</Text>
+          </Box>
+        </Container>
+      </Box>
     </ChakraProvider>
   );
 };

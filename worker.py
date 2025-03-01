@@ -34,10 +34,9 @@ running_task = None
 should_stop = False
 
 
-# 直接透明传递WanVideoPipeline进度的tqdm替代
+# 修改后的 RawTqdm：同步更新进度
 class RawTqdm:
-    """完全透明的进度传递，直接传递WanVideoPipeline的实际进度"""
-
+    """完全透明的进度传递，同步更新进度"""
     def __init__(self, iterable):
         self.iterable = list(iterable) if hasattr(iterable, '__len__') else list(iterable)
         self.total = len(self.iterable)
@@ -56,60 +55,55 @@ class RawTqdm:
             yield item
             current += 1
 
-            # 计算纯粹的原始进度值
+            # 计算进度和 ETA
             raw_progress = current / self.total
-
-            # 计算ETA
             elapsed = time.time() - start_time
             eta = elapsed / current * (self.total - current) if current > 0 else 0
 
-            # 记录日志
             now = time.time()
             if now - self.last_log_time >= self.log_interval or current == 1 or current == self.total:
                 logger.info(f"去噪进度: {current}/{self.total} ({raw_progress * 100:.1f}%) [ETA: {eta:.1f}s]")
                 self.last_log_time = now
 
-            # 原子化更新数据库和发送通知
+            # 同步更新数据库和发送 WebSocket 通知
             if self.task_id:
-                asyncio.create_task(self._update_progress(raw_progress, current, self.total, eta))
+                self.update_progress_sync(raw_progress, current, self.total, eta)
 
-    async def _update_progress(self, progress, current, total, eta):
-        """更新进度到数据库并发送WebSocket通知"""
+    def update_progress_sync(self, progress, current, total, eta):
         try:
-            # 更新数据库
+            # 更新数据库中的进度
             db = SessionLocal()
             try:
                 task = db.query(VideoTask).filter(VideoTask.id == self.task_id).first()
                 if task:
-                    # 直接更新原始进度值
                     task.progress = progress
-
-                    # 更新其他有用信息
                     additional_info = task.additional_params or {}
                     additional_info["step"] = current
                     additional_info["total_steps"] = total
                     additional_info["eta"] = eta
                     task.additional_params = additional_info
-
                     db.commit()
             except Exception as e:
                 logger.error(f"更新数据库进度失败: {e}")
             finally:
                 db.close()
 
-            # 发送WebSocket通知
+            # 同步发送 WebSocket 通知
             try:
                 from app import notify_client
-                await notify_client(self.task_id, {
+                # 创建一个新的事件循环同步运行 notify_client
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(notify_client(self.task_id, {
                     "status": "running",
-                    "progress": progress,  # 直接传递原始进度
+                    "progress": progress,
                     "step": current,
                     "total_steps": total,
                     "eta": eta
-                })
+                }))
+                loop.close()
             except Exception as e:
                 logger.error(f"发送WebSocket通知失败: {e}")
-
         except Exception as e:
             logger.error(f"进度更新失败: {e}")
 
@@ -215,7 +209,7 @@ class GPUWorker:
                 torch_dtype=torch_dtype,
             )
 
-            # 创建管道
+            # 创建管道（注意：WanVideoPipeline 为库里代码，不做修改）
             self.current_pipeline = WanVideoPipeline.from_model_manager(
                 self.model_manager,
                 torch_dtype=torch.bfloat16,
@@ -275,10 +269,11 @@ class GPUWorker:
 
             # 如果是图生视频，加载输入图片
             if task.type == VideoType.IMAGE_TO_VIDEO and task.image_path:
+                from PIL import Image
                 input_image = Image.open(task.image_path)
                 generation_params["input_image"] = input_image
 
-            # 使用纯净的进度传递
+            # 使用同步进度传递
             generation_params["progress_bar_cmd"] = lambda x: RawTqdm(x).set_task_id(task.id)
 
             # 生成视频

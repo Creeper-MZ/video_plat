@@ -1,12 +1,74 @@
+// TaskDetails.jsx
 import React, { useState, useEffect, useRef } from 'react';
+import {
+  Box,
+  Badge,
+  IconButton,
+  Text,
+  HStack,
+  VStack,
+  Heading,
+  Progress,
+  Spinner,
+  Flex,
+  Button,
+  useToast,
+  Alert,
+  AlertIcon,
+  AlertTitle,
+  AlertDescription,
+  Modal,
+  ModalOverlay,
+  ModalContent,
+  ModalHeader,
+  ModalFooter,
+  ModalBody,
+  ModalCloseButton,
+  useDisclosure
+} from '@chakra-ui/react';
+import { ViewIcon, DeleteIcon, RepeatIcon, DownloadIcon, CheckIcon, WarningIcon } from '@chakra-ui/icons';
 
-const TaskDetails = ({ taskId, onCancelTask }) => {
+// 格式化日期
+const formatDate = (dateString) => {
+  if (!dateString) return '-';
+  const date = new Date(dateString);
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  }).format(date);
+};
+
+// 状态徽章配置
+const statusConfig = {
+  queued: { color: 'yellow', label: '排队中' },
+  initializing: { color: 'orange', label: '初始化中' },
+  running: { color: 'blue', label: '生成中' },
+  saving: { color: 'teal', label: '保存中' },
+  completed: { color: 'green', label: '已完成' },
+  failed: { color: 'red', label: '失败' },
+  cancelled: { color: 'gray', label: '已取消' }
+};
+
+export const TaskDetails = ({ taskId, onCancelTask }) => {
   const [task, setTask] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
+  const [videoLoaded, setVideoLoaded] = useState(false);
+  const [videoError, setVideoError] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+
   const socketRef = useRef(null);
   const videoRef = useRef(null);
+  const pingIntervalRef = useRef(null);
+  const fetchIntervalRef = useRef(null);
+  const toast = useToast();
+
+  const { isOpen, onOpen, onClose } = useDisclosure(); // 用于视频预览模态框
 
   // 获取任务详情
   const fetchTaskDetails = async () => {
@@ -20,12 +82,23 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
           if (!prevTask) return data;
 
           // 确保不会把正在运行的任务更新为已完成，除非真的完成了
-          if (prevTask.status === 'running' && data.status === 'completed') {
-            const isTrulyCompleted = data.progress >= 0.99;
-            if (!isTrulyCompleted) {
-              console.log("防止状态回退: 保持运行状态直到真正完成");
-              return { ...data, status: 'running' };
-            }
+          if (
+            prevTask.status === 'running' &&
+            data.status === 'completed' &&
+            !videoLoaded
+          ) {
+            console.log("防止状态回退: 保持运行状态直到视频加载完成");
+            return { ...data, status: 'running', progress: 0.95 };
+          }
+
+          // 如果收到的数据比当前状态旧（时间戳更早），忽略它
+          if (
+            prevTask.timestamp &&
+            data.timestamp &&
+            prevTask.timestamp > data.timestamp
+          ) {
+            console.log("忽略旧数据");
+            return prevTask;
           }
 
           return data;
@@ -49,11 +122,23 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
     }
 
     // 创建新连接
-    const socket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/${taskId}`);
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(`${wsProtocol}//${window.location.host}/ws/${taskId}`);
 
     socket.onopen = () => {
       console.log(`WebSocket connected for task ${taskId}`);
       setConnectionStatus('connected');
+
+      // 设置定时ping保持连接
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+      }
+
+      pingIntervalRef.current = setInterval(() => {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send("ping");
+        }
+      }, 15000); // 每15秒ping一次
     };
 
     socket.onmessage = (event) => {
@@ -61,21 +146,44 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
         const data = JSON.parse(event.data);
         console.log("WebSocket received data:", data);
 
-        // 更新任务状态
-        setTask(prevTask => ({
-          ...prevTask,
-          status: data.status || prevTask.status,
-          progress: data.progress !== undefined ? data.progress : prevTask.progress,
-          error_message: data.error || prevTask.error_message,
-          output_url: data.output_url || prevTask.output_url,
-          status_message: data.status_message || prevTask.status_message,
-          current_step: data.current_step || prevTask.current_step,
-          total_steps: data.total_steps || prevTask.total_steps,
-          estimated_time: data.estimated_time || prevTask.estimated_time
-        }));
+        // 忽略pong响应
+        if (data.pong) return;
 
-        // 保持连接活跃
-        socket.send("ping");
+        // 更新任务状态
+        setTask(prevTask => {
+          // 如果收到的数据比当前状态旧（时间戳更早），忽略它
+          if (
+            prevTask &&
+            prevTask.timestamp &&
+            data.timestamp &&
+            prevTask.timestamp > data.timestamp
+          ) {
+            console.log("忽略旧的WebSocket数据");
+            return prevTask;
+          }
+
+          // 如果当前视频已加载但接收到的状态不是completed，保持completed状态
+          if (
+            prevTask &&
+            prevTask.status === 'completed' &&
+            videoLoaded &&
+            data.status !== 'completed'
+          ) {
+            return {
+              ...prevTask,
+              ...data,
+              status: 'completed',
+              progress: 1.0,
+              timestamp: data.timestamp
+            };
+          }
+
+          return {
+            ...(prevTask || {}),
+            ...data,
+            timestamp: data.timestamp
+          };
+        });
       } catch (error) {
         console.error("Error parsing WebSocket message:", error);
       }
@@ -84,6 +192,11 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
     socket.onclose = (event) => {
       console.log(`WebSocket closed for task ${taskId}:`, event.code, event.reason);
       setConnectionStatus('disconnected');
+
+      // 清除ping interval
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+      }
 
       // 如果任务仍在进行中，尝试重新连接
       if (task && ['queued', 'running', 'initializing', 'saving'].includes(task.status)) {
@@ -107,18 +220,23 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
       initializeWebSocket();
 
       // 定时刷新任务状态 - 对于运行中的任务更频繁刷新
-      const interval = setInterval(() => {
+      fetchIntervalRef.current = setInterval(() => {
         if (task && ['running', 'initializing', 'saving'].includes(task.status)) {
           fetchTaskDetails();
         }
-      }, 1000); // 每秒刷新一次
-
-      // 对于所有任务的常规更新
-      const regularInterval = setInterval(fetchTaskDetails, 5000); // 每5秒刷新一次
+      }, 2000); // 每2秒刷新一次
 
       return () => {
-        clearInterval(interval);
-        clearInterval(regularInterval);
+        // 清理定时器
+        if (fetchIntervalRef.current) {
+          clearInterval(fetchIntervalRef.current);
+        }
+
+        if (pingIntervalRef.current) {
+          clearInterval(pingIntervalRef.current);
+        }
+
+        // 关闭WebSocket连接
         if (socketRef.current) {
           socketRef.current.close();
         }
@@ -126,10 +244,69 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
     }
   }, [taskId]);
 
+  // 当状态变为completed时，检查视频是否可用
+  useEffect(() => {
+    if (task && task.status === 'completed' && !videoLoaded && !videoError) {
+      checkVideoAvailability();
+    }
+  }, [task?.status]);
+
+  // 检查视频是否可用
+  const checkVideoAvailability = async () => {
+    if (!task || !task.output_url) return;
+
+    try {
+      // 检查文件是否存在
+      const response = await fetch(`/api/files/check/video/${taskId}`);
+      const data = await response.json();
+
+      if (data.exists && data.size > 1000) {
+        console.log("视频文件已确认存在:", data);
+        setVideoError(false);
+      } else {
+        console.log("视频文件不存在或太小:", data);
+        setVideoError(true);
+
+        // 如果文件不存在但状态是completed，更新状态
+        if (task.status === 'completed') {
+          setTask(prev => ({
+            ...prev,
+            status: 'running',
+            progress: 0.95,
+            status_message: "等待视频生成完成..."
+          }));
+        }
+      }
+    } catch (error) {
+      console.error("检查视频可用性失败:", error);
+      setVideoError(true);
+    }
+  };
+
   // 重新加载视频
   const handleReloadVideo = () => {
+    setVideoLoaded(false);
+    setVideoError(false);
+    setRetryCount(prev => prev + 1);
+
     if (videoRef.current) {
       videoRef.current.load();
+    }
+
+    // 同时刷新任务状态
+    fetchTaskDetails();
+  };
+
+  // 下载视频
+  const handleDownloadVideo = () => {
+    if (task && task.output_url) {
+      // 创建一个临时链接
+      const link = document.createElement('a');
+      link.href = task.output_url;
+      link.download = `${taskId}.mp4`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
     }
   };
 
@@ -144,7 +321,12 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
   if (error) {
     return (
       <Box textAlign="center" py={8}>
-        <Text color="red.500">{error}</Text>
+        <Alert status="error">
+          <AlertIcon />
+          <AlertTitle>获取任务失败</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+        <Button mt={4} onClick={fetchTaskDetails}>重试</Button>
       </Box>
     );
   }
@@ -170,9 +352,15 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
           <Badge colorScheme={statusColor} fontSize="md" px={2} py={1}>
             {statusLabel}
           </Badge>
-          <Text fontSize="sm">{taskTypeLabel}</Text>
+          <HStack>
+            <Text fontSize="sm">{taskTypeLabel}</Text>
+            <Badge colorScheme={connectionStatus === 'connected' ? 'green' : 'gray'} size="sm">
+              {connectionStatus === 'connected' ? '实时连接' : '检查连接'}
+            </Badge>
+          </HStack>
         </HStack>
 
+        {/* 进度条和状态信息 */}
         {(task.status === 'running' || task.status === 'queued' || task.status === 'initializing' || task.status === 'saving') && (
           <Box>
             <HStack justify="space-between" mb={1}>
@@ -182,27 +370,31 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
             <Progress
               value={task.progress * 100}
               size="sm"
-              colorScheme={task.status === 'initializing' ? "yellow" : task.status === 'saving' ? "green" : "blue"}
+              colorScheme={
+                task.status === 'initializing' ? "orange" :
+                task.status === 'saving' ? "teal" :
+                "blue"
+              }
               borderRadius="md"
               hasStripe
               isAnimated={task.status !== 'queued'}
             />
 
-            {/* 添加详细状态信息 */}
+            {/* 详细状态信息 */}
             {task.status_message && (
               <Text fontSize="sm" mt={1} color="gray.600">
                 {task.status_message}
               </Text>
             )}
 
-            {/* 添加步骤信息 */}
+            {/* 步骤信息 */}
             {task.current_step !== undefined && task.total_steps !== undefined && (
               <Text fontSize="sm" mt={1} color="gray.600">
                 步骤: {task.current_step}/{task.total_steps}
               </Text>
             )}
 
-            {/* 添加预计剩余时间 */}
+            {/* 预计剩余时间 */}
             {task.estimated_time !== undefined && task.estimated_time > 0 && (
               <Text fontSize="sm" mt={1} color="gray.600">
                 预计剩余: {task.estimated_time > 60
@@ -213,12 +405,18 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
           </Box>
         )}
 
+        {/* 错误信息 */}
         {task.error_message && (
-          <Box bg="red.50" p={3} borderRadius="md" borderLeft="4px" borderColor="red.500">
-            <Text fontSize="sm" color="red.600">{task.error_message}</Text>
-          </Box>
+          <Alert status="error" variant="left-accent">
+            <AlertIcon />
+            <Box>
+              <AlertTitle>生成失败</AlertTitle>
+              <AlertDescription fontSize="sm">{task.error_message}</AlertDescription>
+            </Box>
+          </Alert>
         )}
 
+        {/* 提示词显示 */}
         <Box>
           <Text fontWeight="semibold" mb={1}>提示词</Text>
           <Text fontSize="sm" whiteSpace="pre-wrap" bg="gray.50" p={2} borderRadius="md">
@@ -226,46 +424,160 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
           </Text>
         </Box>
 
+        {/* 负面提示词显示 */}
+        {task.negative_prompt && (
+          <Box>
+            <Text fontWeight="semibold" mb={1}>负面提示词</Text>
+            <Text fontSize="sm" whiteSpace="pre-wrap" bg="gray.50" p={2} borderRadius="md" color="gray.600">
+              {task.negative_prompt}
+            </Text>
+          </Box>
+        )}
+
+        {/* 视频预览 */}
         {task.status === 'completed' && task.output_url && (
           <Box mt={2}>
             <HStack justify="space-between" mb={2}>
               <Text fontWeight="semibold">生成结果</Text>
               <HStack>
                 <IconButton
-                  aria-label="重新加载视频"
+                  aria-label="在弹窗中预览"
                   icon={<ViewIcon />}
-                  size="xs"
-                  onClick={handleReloadVideo}
+                  size="sm"
+                  onClick={onOpen}
+                  title="在弹窗中预览"
                 />
-                <Badge colorScheme={connectionStatus === 'connected' ? 'green' : 'gray'} size="sm">
-                  {connectionStatus === 'connected' ? '实时连接' : '检查连接'}
-                </Badge>
+                <IconButton
+                  aria-label="重新加载视频"
+                  icon={<RepeatIcon />}
+                  size="sm"
+                  onClick={handleReloadVideo}
+                  title="重新加载视频"
+                />
+                <IconButton
+                  aria-label="下载视频"
+                  icon={<DownloadIcon />}
+                  size="sm"
+                  colorScheme="blue"
+                  onClick={handleDownloadVideo}
+                  title="下载视频"
+                />
               </HStack>
             </HStack>
-            <Box borderWidth={1} borderRadius="md" overflow="hidden">
+
+            {/* 视频预览区域 */}
+            <Box borderWidth={1} borderRadius="md" overflow="hidden" position="relative">
+              {!videoLoaded && (
+                <Flex
+                  position="absolute"
+                  top="0"
+                  left="0"
+                  right="0"
+                  bottom="0"
+                  bg="gray.100"
+                  zIndex="1"
+                  justify="center"
+                  align="center"
+                  direction="column"
+                >
+                  <Spinner size="xl" color="blue.500" mb={2} />
+                  <Text color="gray.600">加载视频中...</Text>
+                </Flex>
+              )}
+
+              {videoError && (
+                <Alert status="warning" variant="subtle" flexDirection="column" alignItems="center" justifyContent="center" textAlign="center" height="200px">
+                  <AlertIcon boxSize="40px" mr={0} />
+                  <AlertTitle mt={4} mb={1} fontSize="lg">视频加载失败</AlertTitle>
+                  <AlertDescription maxWidth="sm">
+                    视频可能仍在处理中，请稍后再试
+                    <Button
+                      leftIcon={<RepeatIcon />}
+                      mt={4}
+                      colorScheme="blue"
+                      onClick={handleReloadVideo}
+                    >
+                      重新加载
+                    </Button>
+                  </AlertDescription>
+                </Alert>
+              )}
+
               <video
                 ref={videoRef}
                 controls
-                autoPlay
                 width="100%"
                 height="auto"
-                src={task.output_url}
+                src={`${task.output_url}?v=${retryCount}`} // 添加版本参数避免缓存
+                style={{ display: videoError ? 'none' : 'block' }}
+                onLoadedData={() => {
+                  console.log("视频加载完成");
+                  setVideoLoaded(true);
+                  setVideoError(false);
+
+                  // 确保任务状态为已完成
+                  if (task.status !== 'completed') {
+                    setTask(prev => ({
+                      ...prev,
+                      status: 'completed',
+                      progress: 1.0
+                    }));
+                  }
+                }}
                 onError={(e) => {
                   console.error("视频加载失败:", e);
+                  setVideoLoaded(false);
+                  setVideoError(true);
+
                   // 如果是COMPLETED状态但视频无法加载，可能是误报完成
-                  if (task.progress < 0.99) {
+                  if (task.status === 'completed') {
                     console.log("视频未完全生成，重置状态");
-                    setTask(prev => ({...prev, status: 'running'}));
+                    setTask(prev => ({
+                      ...prev,
+                      status: 'running',
+                      progress: 0.95,
+                      status_message: "等待视频生成完成..."
+                    }));
+
+                    // 刷新任务状态
+                    fetchTaskDetails();
                   }
                 }}
               >
                 您的浏览器不支持视频标签
               </video>
             </Box>
+
+            {/* 视频预览模态框 */}
+            <Modal isOpen={isOpen} onClose={onClose} size="xl" isCentered>
+              <ModalOverlay />
+              <ModalContent>
+                <ModalHeader>视频预览</ModalHeader>
+                <ModalCloseButton />
+                <ModalBody>
+                  <video
+                    controls
+                    autoPlay
+                    width="100%"
+                    height="auto"
+                    src={`${task.output_url}?v=${retryCount}`}
+                  >
+                    您的浏览器不支持视频标签
+                  </video>
+                </ModalBody>
+                <ModalFooter>
+                  <Button colorScheme="blue" mr={3} leftIcon={<DownloadIcon />} onClick={handleDownloadVideo}>
+                    下载视频
+                  </Button>
+                  <Button variant="ghost" onClick={onClose}>关闭</Button>
+                </ModalFooter>
+              </ModalContent>
+            </Modal>
           </Box>
         )}
 
-        <VStack align="stretch" spacing={2}>
+        {/* 任务元数据信息 */}
+        <VStack align="stretch" spacing={2} mt={2}>
           <Box>
             <Text fontSize="xs" color="gray.500">创建时间</Text>
             <Text fontSize="sm">{formatDate(task.created_at)}</Text>
@@ -289,24 +601,48 @@ const TaskDetails = ({ taskId, onCancelTask }) => {
             <Text fontSize="xs" color="gray.500">任务ID</Text>
             <Text fontSize="sm" fontFamily="mono">{task.id}</Text>
           </Box>
+
+          {/* 任务参数 */}
+          <Box>
+            <Text fontSize="xs" color="gray.500">参数设置</Text>
+            <HStack fontSize="sm" mt={1} flexWrap="wrap" spacing={2}>
+              <Badge>{task.resolution}</Badge>
+              <Badge>{task.frames}帧</Badge>
+              <Badge>{task.fps}fps</Badge>
+              <Badge>{task.steps}步</Badge>
+              <Badge>{task.model_precision}</Badge>
+              {task.save_vram && <Badge colorScheme="purple">节省显存</Badge>}
+              {task.tiled && <Badge colorScheme="teal">平铺模式</Badge>}
+            </HStack>
+          </Box>
         </VStack>
 
-        {['queued', 'running'].includes(task.status) && (
-          <Box mt={2}>
-            <IconButton
-              icon={<DeleteIcon />}
+        {/* 取消任务按钮 */}
+        {['queued', 'running', 'initializing', 'saving'].includes(task.status) && (
+          <Box mt={4}>
+            <Button
+              leftIcon={<DeleteIcon />}
               colorScheme="red"
               variant="outline"
               width="full"
-              onClick={() => onCancelTask(task.id)}
+              onClick={() => {
+                onCancelTask(task.id);
+                toast({
+                  title: "正在取消任务",
+                  description: "请稍等，任务正在取消中...",
+                  status: "info",
+                  duration: 3000,
+                  isClosable: true,
+                });
+              }}
             >
               取消任务
-            </IconButton>
+            </Button>
           </Box>
         )}
       </VStack>
     </Box>
   );
 };
-export { TaskDetails };
+
 export default TaskDetails;

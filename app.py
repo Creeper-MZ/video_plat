@@ -8,14 +8,27 @@ from typing import List, Optional, Dict, Any
 from enum import Enum
 
 import uvicorn
-from fastapi import FastAPI, File, UploadFile, WebSocket, HTTPException, Form, BackgroundTasks, Depends
+from fastapi import FastAPI, File, UploadFile, WebSocket, HTTPException, Form, BackgroundTasks, Depends, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, JSON, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+
+# 配置日志
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("api.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("api")
 
 # 创建应用
 app = FastAPI(title="视频生成平台", description="基于Wan2.1的文生视频和图生视频平台")
@@ -95,9 +108,10 @@ class VideoTask(Base):
     gpu_id = Column(Integer, nullable=True)
     progress = Column(Float, default=0.0)
     error_message = Column(String, nullable=True)
-    tiled = Column(Boolean, default=False)
+    tiled = Column(Boolean, default=True)
     additional_params = Column(JSON, nullable=True)
     user_id = Column(String, nullable=True)
+    status_message = Column(String, nullable=True)  # 添加状态消息字段
 
 
 # 创建表
@@ -223,23 +237,26 @@ async def create_task(
         type=task_data["type"],
         prompt=task_data["prompt"],
         negative_prompt=task_data.get("negative_prompt", ""),
-        resolution=task_data.get("resolution", Resolution.RESOLUTION_720P),
-        frames=task_data.get("frames", 16),
-        fps=task_data.get("fps", 25),
-        steps=task_data.get("steps", 50),
+        resolution=task_data.get("resolution", Resolution.RESOLUTION_480P),
+        frames=task_data.get("frames", 100),
+        fps=task_data.get("fps", 20),
+        steps=task_data.get("steps", 40),
         seed=task_data.get("seed", 0),
         status=TaskStatus.QUEUED,
-        model_precision=task_data.get("model_precision", ModelPrecision.FP16),
+        model_precision=task_data.get("model_precision", ModelPrecision.FP8),
         save_vram=task_data.get("save_vram", False),
         image_path=image_path,
         output_path=output_path,
         tiled=task_data.get("tiled", True),
         additional_params=task_data.get("additional_params"),
+        status_message="任务已创建，等待分配资源"
     )
 
     db.add(task)
     db.commit()
     db.refresh(task)
+
+    logger.info(f"创建新任务: {task_id}, 类型: {task.type}, 分辨率: {task.resolution}")
 
     # 添加到队列并尝试启动处理
     task_queue.append(task_id)
@@ -250,7 +267,9 @@ async def create_task(
         status=TaskStatus.QUEUED,
         type=task_data["type"],
         created_at=task.created_at,
-        output_url=f"/api/videos/{task_id}"
+        output_url=f"/api/videos/{task_id}",
+        status_message="任务已创建，等待分配资源",
+        total_steps=task.steps
     )
 
 
@@ -267,6 +286,15 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
             with open(progress_file, "r") as f:
                 progress_data = json.load(f)
 
+                # 仅当显示完成时检查视频文件是否存在
+                if progress_data.get("status") == TaskStatus.COMPLETED:
+                    # 检查视频文件是否真的存在
+                    if not os.path.exists(task.output_path) or os.path.getsize(task.output_path) < 1000:
+                        # 文件不存在或太小，可能是保存失败，强制状态为处理中
+                        progress_data["status"] = TaskStatus.RUNNING
+                        progress_data["status_message"] = "等待视频生成完成..."
+                        progress_data["progress"] = 0.95
+
                 # 更新任务状态
                 if progress_data.get("status") and progress_data["status"] != task.status:
                     task.status = progress_data["status"]
@@ -282,7 +310,7 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
                 # 提交更新
                 db.commit()
     except Exception as e:
-        print(f"读取进度文件失败: {e}")
+        logger.error(f"读取进度文件失败: {e}")
 
     # 计算预计时间
     estimated_time = None
@@ -300,6 +328,14 @@ def get_task(task_id: str, db: Session = Depends(get_db)):
     status_message = task.status_message
     if not status_message and task.additional_params and 'status_message' in task.additional_params:
         status_message = task.additional_params.get('status_message')
+
+    # 特殊处理COMPLETED状态 - 确保视频文件真的存在
+    if task.status == TaskStatus.COMPLETED:
+        if not os.path.exists(task.output_path) or os.path.getsize(task.output_path) < 1000:
+            task.status = TaskStatus.RUNNING
+            task.progress = 0.95
+            status_message = "等待视频生成完成..."
+            db.commit()
 
     return TaskResponse(
         id=task.id,
@@ -332,20 +368,35 @@ def list_tasks(
     total = query.count()
     tasks = query.order_by(VideoTask.created_at.desc()).offset(offset).limit(limit).all()
 
-    return [
-        TaskResponse(
+    result = []
+    for task in tasks:
+        # 获取状态消息
+        status_message = task.status_message
+        if not status_message and task.additional_params and 'status_message' in task.additional_params:
+            status_message = task.additional_params.get('status_message')
+
+        # 特殊处理COMPLETED状态 - 确保视频文件真的存在
+        task_status = task.status
+        if task_status == TaskStatus.COMPLETED:
+            if not os.path.exists(task.output_path) or os.path.getsize(task.output_path) < 1000:
+                task_status = TaskStatus.RUNNING
+                status_message = "等待视频生成完成..."
+
+        result.append(TaskResponse(
             id=task.id,
-            status=task.status,
+            status=task_status,
             type=task.type,
             progress=task.progress,
             created_at=task.created_at,
             started_at=task.started_at,
             completed_at=task.completed_at,
-            output_url=f"/api/videos/{task.id}" if task.status == TaskStatus.COMPLETED else None,
-            error_message=task.error_message
-        )
-        for task in tasks
-    ]
+            output_url=f"/api/videos/{task.id}" if task_status == TaskStatus.COMPLETED else None,
+            error_message=task.error_message,
+            status_message=status_message,
+            total_steps=task.steps
+        ))
+
+    return result
 
 
 @app.delete("/api/tasks/{task_id}")
@@ -354,22 +405,32 @@ def cancel_task(task_id: str, db: Session = Depends(get_db)):
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
 
-    if task.status in [TaskStatus.QUEUED, TaskStatus.RUNNING]:
+    if task.status in [TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.INITIALIZING, TaskStatus.SAVING]:
         # 如果任务在队列中，从队列移除
         if task_id in task_queue:
             task_queue.remove(task_id)
 
         # 如果任务正在运行，标记为取消
-        if task.status == TaskStatus.RUNNING and task.gpu_id is not None:
+        if task.status != TaskStatus.QUEUED and task.gpu_id is not None:
             # 在这里你可能需要一个机制来通知GPU worker停止处理
             # 这里简化处理，直接释放GPU
             gpu_status[task.gpu_id] = False
 
         task.status = TaskStatus.CANCELLED
+        task.status_message = "任务已取消"
         db.commit()
 
-        # 通知客户端
-        notify_client(task_id, {"status": TaskStatus.CANCELLED})
+        # 写入进度文件通知前端
+        try:
+            progress_file = f"progress_{task_id}.json"
+            with open(progress_file, "w") as f:
+                json.dump({
+                    "status": TaskStatus.CANCELLED,
+                    "status_message": "任务已取消",
+                    "timestamp": time.time()
+                }, f)
+        except Exception as e:
+            logger.error(f"写入进度文件失败: {e}")
 
     return {"status": "success", "message": "任务已取消"}
 
@@ -377,16 +438,48 @@ def cancel_task(task_id: str, db: Session = Depends(get_db)):
 @app.get("/api/videos/{task_id}")
 def get_video(task_id: str, db: Session = Depends(get_db)):
     task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
-    if not task or not task.output_path or task.status != TaskStatus.COMPLETED:
-        raise HTTPException(status_code=404, detail="视频不存在或未完成生成")
+    if not task or not task.output_path:
+        raise HTTPException(status_code=404, detail="视频不存在")
 
-    return FileResponse(task.output_path, media_type="video/mp4", filename=f"{task_id}.mp4")
+    if not os.path.exists(task.output_path):
+        raise HTTPException(status_code=404, detail="视频文件不存在，可能仍在生成中")
+
+    if task.status != TaskStatus.COMPLETED:
+        # 检查视频文件是否真的存在且有效
+        if os.path.exists(task.output_path) and os.path.getsize(task.output_path) > 1000:
+            # 文件存在并且大小合理，更新任务状态为已完成
+            task.status = TaskStatus.COMPLETED
+            task.progress = 1.0
+            if not task.completed_at:
+                task.completed_at = datetime.utcnow()
+            db.commit()
+        else:
+            raise HTTPException(status_code=404, detail="视频仍在生成中")
+
+    # 使用FileResponse发送文件，添加内容类型和下载文件名
+    response = FileResponse(
+        task.output_path,
+        media_type="video/mp4",
+        filename=f"{task_id}.mp4"
+    )
+
+    # 添加必要的响应头，防止缓存问题
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+
+    return response
 
 
 @app.websocket("/ws/{task_id}")
 async def websocket_endpoint(websocket: WebSocket, task_id: str):
     await websocket.accept()
     active_connections[task_id] = websocket
+    logger.info(f"WebSocket连接已建立: 任务 {task_id}")
+
+    # 发送连接成功消息
+    await websocket.send_json({"connection_status": "connected"})
+
     try:
         # 连接成功后，立即发送一次当前状态
         db = SessionLocal()
@@ -408,14 +501,23 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
 
                 current_step = int(task.progress * task.steps)
 
+            # 特殊处理COMPLETED状态 - 确保视频文件真的存在
+            task_status = task.status
+            if task_status == TaskStatus.COMPLETED:
+                if not os.path.exists(task.output_path) or os.path.getsize(task.output_path) < 1000:
+                    task_status = TaskStatus.RUNNING
+                    status_message = "等待视频生成完成..."
+
             # 发送初始状态
             await websocket.send_json({
-                "status": task.status,
+                "status": task_status,
                 "progress": task.progress,
                 "status_message": status_message,
                 "current_step": current_step,
                 "total_steps": task.steps,
-                "estimated_time": estimated_time
+                "estimated_time": estimated_time,
+                "output_url": f"/api/videos/{task_id}" if task_status == TaskStatus.COMPLETED else None,
+                "timestamp": time.time()
             })
         db.close()
 
@@ -432,32 +534,51 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                         last_mtime = mtime
                         with open(progress_file, "r") as f:
                             progress_data = json.load(f)
+
+                            # 特殊处理COMPLETED状态 - 确保视频文件真的存在
+                            if progress_data.get("status") == TaskStatus.COMPLETED:
+                                db = SessionLocal()
+                                task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
+                                if task and (not os.path.exists(task.output_path) or os.path.getsize(
+                                        task.output_path) < 1000):
+                                    progress_data["status"] = TaskStatus.RUNNING
+                                    progress_data["status_message"] = "等待视频生成完成..."
+                                    progress_data["progress"] = 0.95
+                                db.close()
+
+                            # 添加时间戳以确保前端知道这是新消息
+                            progress_data["timestamp"] = time.time()
+
                             await websocket.send_json(progress_data)
             except Exception as e:
-                print(f"读取进度文件失败: {e}")
+                logger.error(f"读取或发送进度数据失败: {e}")
 
             # 接收客户端消息以保持连接活跃
             try:
                 msg = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
                 # 如果客户端发送了消息，可以在这里处理
+                if msg == "ping":
+                    await websocket.send_json({"pong": True, "timestamp": time.time()})
             except asyncio.TimeoutError:
                 # 超时，继续循环
                 pass
             except Exception as e:
                 # 连接关闭或其他错误
+                logger.error(f"WebSocket错误: {e}")
                 break
 
             # 休眠一小段时间，避免CPU占用过高
             await asyncio.sleep(0.5)
     except Exception as e:
-        print(f"WebSocket错误: {e}")
+        logger.error(f"WebSocket错误: {e}")
     finally:
         # 连接关闭时移除
         if task_id in active_connections:
             del active_connections[task_id]
+            logger.info(f"WebSocket连接已关闭: 任务 {task_id}")
 
 
-# 队列处理和GPU分配
+# 检查GPU状态和分配任务
 async def process_queue(db: Session):
     # 检查是否有可用GPU和等待中的任务
     for gpu_id, is_busy in gpu_status.items():
@@ -469,91 +590,92 @@ async def process_queue(db: Session):
             # 更新任务状态
             task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
             if task and task.status == TaskStatus.QUEUED:
-                task.status = TaskStatus.RUNNING
+                task.status = TaskStatus.INITIALIZING
                 task.started_at = datetime.utcnow()
                 task.gpu_id = gpu_id
+                task.status_message = f"已分配GPU {gpu_id}，正在初始化..."
                 db.commit()
+
+                # 更新进度文件
+                try:
+                    progress_file = f"progress_{task_id}.json"
+                    with open(progress_file, "w") as f:
+                        json.dump({
+                            "status": TaskStatus.INITIALIZING,
+                            "progress": 0.0,
+                            "status_message": f"已分配GPU {gpu_id}，正在初始化...",
+                            "timestamp": time.time()
+                        }, f)
+                except Exception as e:
+                    logger.error(f"写入进度文件失败: {e}")
 
                 # 标记GPU为忙碌
                 gpu_status[gpu_id] = True
 
-                # 启动视频生成过程
-                # 注意：实际实现中，这应该启动一个单独的进程或线程来处理
-                # 这里简化为一个函数调用
-                await run_video_generation(task_id, gpu_id, db)
-
-
-async def run_video_generation(task_id: str, gpu_id: int, db: Session):
-    try:
-        # 获取任务详情
-        task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
-        if not task:
-            return
-
-        # 模拟生成过程
-        # 在实际项目中，这里应该调用Wan2.1的API进行视频生成
-        # 这里仅做演示，用时间延迟模拟生成过程
-        total_steps = task.steps
-        for step in range(total_steps + 1):
-            # 检查任务是否被取消
-            task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
-            if task.status == TaskStatus.CANCELLED:
-                break
-
-            # 更新进度
-            progress = step / total_steps
-            task.progress = progress
-            db.commit()
-
-            # 通知客户端进度更新
-            await notify_client(task_id, {"status": TaskStatus.RUNNING, "progress": progress})
-
-            # 模拟处理时间
-            await asyncio.sleep(0.5)  # 在实际应用中，这会被实际处理时间替代
-
-        # 完成任务
-        if task.status != TaskStatus.CANCELLED:
-            task.status = TaskStatus.COMPLETED
-            task.progress = 1.0
-            task.completed_at = datetime.utcnow()
-            db.commit()
-
-            # 通知客户端完成
-            await notify_client(task_id, {
-                "status": TaskStatus.COMPLETED,
-                "progress": 1.0,
-                "output_url": f"/api/videos/{task_id}"
-            })
-
-    except Exception as e:
-        # 处理错误
-        task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
-        if task:
-            task.status = TaskStatus.FAILED
-            task.error_message = str(e)
-            db.commit()
-
-            # 通知客户端错误
-            await notify_client(task_id, {"status": TaskStatus.FAILED, "error": str(e)})
-
-    finally:
-        # 释放GPU
-        gpu_status[gpu_id] = False
-        # 处理队列中的下一个任务
-        await process_queue(db)
-
-
-async def notify_client(task_id: str, data: dict):
-    if task_id in active_connections:
-        try:
-            await active_connections[task_id].send_json(data)
-        except:
-            # 如果发送失败，移除连接
-            del active_connections[task_id]
+                logger.info(f"已将任务 {task_id} 分配给GPU {gpu_id}")
 
 
 # 添加前端静态文件服务
+@app.middleware("http")
+async def check_if_static_file(request: Request, call_next):
+    # 检查是否是API请求
+    if request.url.path.startswith("/api/") or request.url.path.startswith("/ws/"):
+        return await call_next(request)
+
+    # 检查是否存在静态文件
+    static_path = os.path.join("frontend/build", request.url.path.lstrip("/"))
+    if os.path.exists(static_path) and os.path.isfile(static_path):
+        return await call_next(request)
+
+    # 如果不是API请求且没有找到静态文件，返回index.html（SPA模式）
+    return FileResponse(os.path.join("frontend/build", "index.html"))
+
+
 app.mount("/", StaticFiles(directory="frontend/build", html=True), name="static")
+
+
+# 检查GPU状态的端点
+@app.get("/api/system/status")
+def get_system_status():
+    # 获取GPU状态
+    gpu_busy_count = sum(1 for is_busy in gpu_status.values() if is_busy)
+
+    # 获取队列长度
+    queue_length = len(task_queue)
+
+    return {
+        "total_gpus": len(gpu_status),
+        "busy_gpus": gpu_busy_count,
+        "queue_length": queue_length,
+        "gpu_status": gpu_status,
+        "timestamp": time.time()
+    }
+
+
+# 检查文件是否存在
+@app.get("/api/files/check/{file_type}/{file_id}")
+def check_file_exists(file_type: str, file_id: str):
+    if file_type == "video":
+        file_path = os.path.join("outputs", f"{file_id}.mp4")
+        if os.path.exists(file_path):
+            return {
+                "exists": True,
+                "size": os.path.getsize(file_path),
+                "last_modified": os.path.getmtime(file_path)
+            }
+    elif file_type == "image":
+        # 检查所有可能的图片扩展名
+        for ext in [".jpg", ".jpeg", ".png", ".webp"]:
+            file_path = os.path.join("uploads", f"{file_id}{ext}")
+            if os.path.exists(file_path):
+                return {
+                    "exists": True,
+                    "size": os.path.getsize(file_path),
+                    "last_modified": os.path.getmtime(file_path)
+                }
+
+    return {"exists": False}
+
 
 # 主入口
 if __name__ == "__main__":

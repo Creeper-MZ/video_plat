@@ -4,6 +4,7 @@ import torch
 import signal
 import asyncio
 import logging
+import json
 from PIL import Image
 from datetime import datetime
 from sqlalchemy import create_engine
@@ -34,6 +35,100 @@ running_task = None
 should_stop = False
 
 
+# 自定义进度条类，用于跟踪WanVideoPipeline进度
+class ProgressBar:
+    def __init__(self, task_id, db_session, total_steps, model_name="dit"):
+        self.task_id = task_id
+        self.db_session = db_session
+        self.total_steps = total_steps
+        self.model_name = model_name
+        self.current_step = 0
+        self.start_time = time.time()
+        self.last_update_time = 0
+
+    def __call__(self, iterable):
+        for item in iterable:
+            self.current_step += 1
+
+            # 限制更新频率，避免数据库负担过重
+            current_time = time.time()
+            if current_time - self.last_update_time > 0.5:  # 最多每0.5秒更新一次
+                # 计算进度百分比
+                progress = self.current_step / self.total_steps
+
+                # 更新数据库
+                try:
+                    task = self.db_session.query(VideoTask).filter(VideoTask.id == self.task_id).first()
+                    if task and task.status in [TaskStatus.RUNNING, TaskStatus.INITIALIZING]:
+                        task.progress = progress
+
+                        # 计算预计剩余时间
+                        elapsed_time = current_time - self.start_time
+                        if progress > 0.01:  # 至少完成1%才计算
+                            remaining_time = int((elapsed_time / progress) * (1 - progress))
+                            # 保存状态消息
+                            status_message = f"正在生成: 步骤 {self.current_step}/{self.total_steps}, 预计剩余 {remaining_time} 秒"
+
+                            if not hasattr(task, 'status_message') or task.status_message is None:
+                                if task.additional_params is None:
+                                    task.additional_params = {}
+                                task.additional_params['status_message'] = status_message
+                            else:
+                                task.status_message = status_message
+
+                        self.db_session.commit()
+
+                        # 写入进度文件，以便API服务器读取
+                        self._save_progress_file(progress)
+
+                        # 记录日志
+                        if self.current_step % 5 == 0 or self.current_step == self.total_steps:
+                            logger.info(
+                                f"[{self.model_name}] 任务 {self.task_id} 进度: {progress:.1%}, 步骤 {self.current_step}/{self.total_steps}")
+
+                    self.last_update_time = current_time
+                except Exception as e:
+                    logger.error(f"更新进度失败: {e}", exc_info=True)
+
+            yield item
+
+        # 完成所有步骤后，确保进度为100%
+        try:
+            task = self.db_session.query(VideoTask).filter(VideoTask.id == self.task_id).first()
+            if task and task.status in [TaskStatus.RUNNING, TaskStatus.INITIALIZING]:
+                task.progress = 1.0
+                self.db_session.commit()
+                self._save_progress_file(1.0, final=True)
+        except Exception as e:
+            logger.error(f"完成时更新进度失败: {e}", exc_info=True)
+
+    def _save_progress_file(self, progress, final=False):
+        """保存进度信息到文件，供API服务器读取"""
+        try:
+            progress_data = {
+                "status": TaskStatus.RUNNING,
+                "progress": float(progress),
+                "current_step": self.current_step,
+                "total_steps": self.total_steps,
+                "status_message": f"正在生成: 步骤 {self.current_step}/{self.total_steps}"
+            }
+
+            if final:
+                progress_data["status_message"] = f"生成完成，共 {self.total_steps} 步"
+
+            # 添加时间戳避免缓存
+            progress_data["timestamp"] = time.time()
+
+            progress_file = f"progress_{self.task_id}.json"
+            with open(progress_file, "w") as f:
+                json.dump(progress_data, f)
+
+            return True
+        except Exception as e:
+            logger.error(f"保存进度文件失败: {e}", exc_info=True)
+            return False
+
+
 class GPUWorker:
     def __init__(self, gpu_id):
         self.gpu_id = gpu_id
@@ -41,6 +136,7 @@ class GPUWorker:
         self.model_manager = None
         self.current_pipeline = None
         self.current_task = None
+        self.is_processing = False
 
     async def initialize(self):
         logger.info(f"GPU Worker {self.gpu_id} 初始化中...")
@@ -90,8 +186,6 @@ class GPUWorker:
 
             # 加载模型文件
             model_files = []
-            t5_model_file = ""
-            vae_model_file = ""
 
             # 文生视频模型
             if model_type == VideoType.TEXT_TO_VIDEO:
@@ -197,6 +291,7 @@ class GPUWorker:
 
     async def process_task(self, task):
         self.current_task = task
+        self.is_processing = True
         db = SessionLocal()
 
         try:
@@ -212,87 +307,87 @@ class GPUWorker:
             # 设置显存管理配置
             num_persistent_param = None if not task.save_vram else 0
             logger.info(f"显存节省模式: {'开启' if task.save_vram else '关闭'}")
-            self.current_pipeline.enable_vram_management(num_persistent_param_in_dit=num_persistent_param)
+
+            # 更新任务状态为"初始化模型"
+            await self._update_task_status(task.id, db, TaskStatus.INITIALIZING, "正在初始化模型和加载资源...")
 
             # 准备生成参数
             generation_params = {
                 "prompt": task.prompt,
                 "negative_prompt": task.negative_prompt,
+                "height": height,
+                "width": width,
+                "num_frames": task.frames,
                 "num_inference_steps": task.steps,
+                "cfg_scale": 5.0,  # 使用默认值
                 "seed": task.seed if task.seed >= 0 else None,
                 "tiled": task.tiled,
-                # "width": width,
-                # "height": height,
             }
 
             # 如果是图生视频，加载输入图片
             if task.type == VideoType.IMAGE_TO_VIDEO and task.image_path:
                 logger.info(f"加载输入图片: {task.image_path}")
-                input_image = Image.open(task.image_path)
+                input_image = Image.open(task.image_path).convert("RGB")
                 generation_params["input_image"] = input_image
 
-            # 更新任务状态为"初始化模型"
-            self._update_task_status(task.id, db, "initializing", "正在初始化模型...")
+            # 启用显存管理 (必须在加载模型后调用)
+            if self.current_pipeline:
+                self.current_pipeline.enable_vram_management(num_persistent_param_in_dit=num_persistent_param)
 
-            # 注册回调以更新进度
-            self._register_progress_callback(task.id, db)
+            # 更新任务状态为"开始生成"
+            await self._update_task_status(task.id, db, TaskStatus.RUNNING, "正在生成视频...")
+
+            # 创建进度条对象
+            progress_bar = ProgressBar(task.id, db, total_steps=task.steps)
+
+            # 设置生成进度回调
+            generation_params["progress_bar_cmd"] = progress_bar
+
+            # 实时记录生成开始时间
+            start_time = time.time()
 
             # 生成视频
             logger.info(f"开始生成视频 任务ID: {task.id}")
-            self._update_task_status(task.id, db, "generating", "开始生成过程...")
+            video = self.current_pipeline(**generation_params)
 
-            # 实时记录生成开始时间，用于预估剩余时间
-            start_time = time.time()
-
-            # 定期更新进度的协程
-            async def update_progress():
-                prev_step = 0
-                while task.status == TaskStatus.RUNNING:
-                    # 查询当前任务最新状态
-                    current_task = db.query(VideoTask).filter(VideoTask.id == task.id).first()
-                    if not current_task or current_task.status != TaskStatus.RUNNING:
-                        break
-
-                    elapsed_time = time.time() - start_time
-                    if current_task.progress > 0:
-                        estimated_total_time = elapsed_time / current_task.progress
-                        remaining_time = estimated_total_time - elapsed_time
-
-                        # 更新详细进度信息
-                        current_step = int(current_task.progress * task.steps)
-                        if current_step > prev_step:
-                            prev_step = current_step
-                            logger.info(
-                                f"任务 {task.id} 进度: {current_task.progress:.1%}, 步骤 {current_step}/{task.steps}, 预计剩余时间: {remaining_time:.1f}秒")
-
-                            # 更新详细状态信息
-                            status_message = f"正在生成: 步骤 {current_step}/{task.steps}, 预计剩余 {int(remaining_time)}秒"
-                            self._update_task_status(task.id, db, None, status_message)
-
-                    await asyncio.sleep(2)  # 每2秒更新一次
-
-            # 启动进度更新协程
-            progress_task = asyncio.create_task(update_progress())
-
-            # 使用回调进行进度跟踪
-            video = await self._generate_video_with_progress(task, generation_params, db)
-
-            # 取消进度更新协程
-            progress_task.cancel()
-
-            # 更新任务状态
+            # 更新保存状态
             logger.info(f"视频生成完成，正在保存: {task.output_path}")
-            self._update_task_status(task.id, db, "saving", "视频生成完成，正在保存...")
+            await self._update_task_status(task.id, db, TaskStatus.SAVING, "视频生成完成，正在保存...")
+
+            # 避免快速变化任务状态导致前端混淆，等待一小段时间
+            await asyncio.sleep(1)
 
             # 保存视频
             from diffsynth import save_video
             save_video(video, task.output_path, fps=task.fps, quality=5)
 
+            # 确认视频文件已保存成功
+            if not os.path.exists(task.output_path):
+                raise FileNotFoundError(f"视频文件未成功保存到 {task.output_path}")
+
+            # 获取视频文件大小
+            video_size = os.path.getsize(task.output_path) / (1024 * 1024)  # MB
+            logger.info(f"视频已保存: {task.output_path}, 大小: {video_size:.2f}MB")
+
+            # 再次等待一小段时间，确保视频文件完全写入
+            await asyncio.sleep(1)
+
             # 更新任务状态
             task.status = TaskStatus.COMPLETED
             task.progress = 1.0
             task.completed_at = datetime.utcnow()
+            if task.additional_params is None:
+                task.additional_params = {}
+            task.additional_params['video_size'] = f"{video_size:.2f}MB"
             db.commit()
+
+            # 更新进度文件标记完成
+            self._write_progress_file(task.id, {
+                "status": TaskStatus.COMPLETED,
+                "progress": 1.0,
+                "status_message": "生成已完成",
+                "output_url": f"/api/videos/{task.id}"
+            })
 
             # 计算总耗时
             total_time = time.time() - start_time
@@ -304,75 +399,30 @@ class GPUWorker:
             task.status = TaskStatus.FAILED
             task.error_message = str(e)
             db.commit()
+
+            # 更新进度文件标记失败
+            self._write_progress_file(task.id, {
+                "status": TaskStatus.FAILED,
+                "error": str(e)
+            })
+
             return False
 
         finally:
+            # 释放资源
+            self.is_processing = False
+            if self.current_pipeline:
+                try:
+                    # 尝试清理CUDA内存
+                    import gc
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    logger.info(f"已清理任务 {task.id} 的CUDA内存")
+                except Exception as e:
+                    logger.error(f"清理内存失败: {e}")
+
             db.close()
             self.current_task = None
-
-    async def _generate_video_with_progress(self, task, generation_params, db):
-        """带有进度更新的视频生成过程"""
-        # 这里应该根据实际情况调用Wan2.1的API
-        # 注意：在实际实现中，你需要检查Wan2.1是否提供回调机制
-
-        # 模拟生成过程，用于演示
-        total_steps = task.steps
-        video = None
-
-        try:
-            # 实际执行视频生成
-            logger.info(f"执行视频生成: 类型={task.type}, 总步数={total_steps}")
-            video = self.current_pipeline(**generation_params)
-            return video
-
-        except Exception as e:
-            logger.error(f"视频生成过程中出错: {e}", exc_info=True)
-            raise e
-
-    def _update_task_status(self, task_id, db, status=None, status_message=None):
-        """更新任务状态和状态消息"""
-        task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
-        if not task:
-            return False
-
-        if status:
-            task.status = status
-
-        if status_message:
-            if not hasattr(task, 'status_message'):
-                # 如果status_message字段不存在，我们通过additional_params存储
-                if not task.additional_params:
-                    task.additional_params = {}
-                task.additional_params['status_message'] = status_message
-            else:
-                task.status_message = status_message
-
-        db.commit()
-
-        # 通过WebSocket通知前端状态变化
-        asyncio.create_task(self._notify_progress(task_id, {
-            'status': task.status,
-            'progress': task.progress,
-            'status_message': status_message
-        }))
-
-        return True
-
-    async def _notify_progress(self, task_id, data):
-        """通知API服务器更新任务进度"""
-        try:
-            # 通过本地JSON文件或Redis等方式与API服务器通信
-            # 这里简化实现，将信息写入临时文件
-            import json
-            progress_file = f"progress_{task_id}.json"
-            with open(progress_file, "w") as f:
-                json.dump(data, f)
-
-            logger.debug(f"更新进度信息: {data}")
-            return True
-        except Exception as e:
-            logger.error(f"通知进度更新失败: {e}")
-            return False
 
     def _get_resolution_dimensions(self, resolution):
         if resolution == Resolution.RESOLUTION_720P:
@@ -384,56 +434,78 @@ class GPUWorker:
         elif resolution == Resolution.RESOLUTION_480P_VERTICAL:
             return 480, 854
         else:
-            return 1280, 720  # 默认为720P
+            return 854, 480  # 默认为480P
 
-    def _register_progress_callback(self, task_id, db):
+    async def _update_task_status(self, task_id, db, status=None, status_message=None):
+        """更新任务状态和状态消息"""
+        task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
+        if not task:
+            logger.error(f"任务 {task_id} 不存在，无法更新状态")
+            return False
+
+        if status:
+            task.status = status
+
+        if status_message:
+            if not hasattr(task, 'status_message') or task.status_message is None:
+                # 如果status_message字段不存在，我们通过additional_params存储
+                if not task.additional_params:
+                    task.additional_params = {}
+                task.additional_params['status_message'] = status_message
+            else:
+                task.status_message = status_message
+
+        db.commit()
+
+        # 写入进度文件通知前端
+        self._write_progress_file(task_id, {
+            'status': status if status else task.status,
+            'progress': task.progress,
+            'status_message': status_message
+        })
+
+        return True
+
+    def _write_progress_file(self, task_id, data):
+        """写入进度文件，以便API服务器读取"""
         try:
-            # 在实际情况下，这里应该注册Wan2.1模型的回调函数
-            # 例如，如果Wan2.1提供了进度回调，则应在此处注册
+            progress_file = f"progress_{task_id}.json"
+            # 添加时间戳避免缓存
+            data["timestamp"] = time.time()
 
-            # 自定义进度回调函数
-            def progress_callback(step, total_steps, latents=None):
-                progress = step / total_steps
+            with open(progress_file, "w") as f:
+                json.dump(data, f)
 
-                # 更新数据库
-                task = db.query(VideoTask).filter(VideoTask.id == task_id).first()
-                if task and task.status == TaskStatus.RUNNING:
-                    task.progress = progress
-                    db.commit()
-
-                    # 每5步输出一次日志
-                    if step % 5 == 0 or step == total_steps - 1:
-                        logger.info(f"任务 {task_id} 进度: {progress:.1%}, 步骤 {step}/{total_steps}")
-
-                    # 通知客户端进度更新
-                    asyncio.create_task(self._notify_progress(task_id, {
-                        'status': TaskStatus.RUNNING,
-                        'progress': progress,
-                        'current_step': step,
-                        'total_steps': total_steps,
-                        'status_message': f"正在生成: 步骤 {step}/{total_steps}"
-                    }))
-
-            # 尝试在pipeline中注册回调
-            # self.current_pipeline.register_callback(progress_callback)
-
-            # 如果无法直接注册回调，也可以在模型代码中添加钩子
-            # 或者修改模型代码直接调用回调函数
-
-            # 示例：为了演示，我们模拟一个伪回调注册
-            setattr(self.current_pipeline, "_progress_callback", progress_callback)
-
-            logger.info(f"已注册进度回调函数: 任务ID {task_id}")
-
+            return True
         except Exception as e:
-            logger.error(f"注册进度回调失败: {e}", exc_info=True)
+            logger.error(f"写入进度文件失败: {e}")
+            return False
 
     def stop_current_task(self):
-        if self.current_pipeline:
-            # 在实际情况下，这里应该调用Wan2.1的中断方法
-            # 现在只能简单记录
-            logger.info(f"尝试停止GPU {self.gpu_id}上的当前任务")
-        return True
+        if not self.current_pipeline or not self.current_task:
+            logger.warning(f"GPU {self.gpu_id} 没有正在运行的任务，无法停止")
+            return False
+
+        if not self.is_processing:
+            logger.warning(f"GPU {self.gpu_id} 任务已不在处理中，无需停止")
+            return True
+
+        try:
+            logger.info(f"正在停止 GPU {self.gpu_id} 上的任务 {self.current_task.id}")
+            # 在实际实现中，这里可能需要设置一个停止标志或信号
+            # 对于WanVideoPipeline，可能没有直接的中断方法
+
+            # 尝试释放资源
+            import gc
+            torch.cuda.empty_cache()
+            gc.collect()
+
+            # 标记处理已停止
+            self.is_processing = False
+            return True
+        except Exception as e:
+            logger.error(f"停止任务失败: {e}")
+            return False
 
 
 async def worker_main(gpu_id):
@@ -449,7 +521,7 @@ async def worker_main(gpu_id):
             # 查找分配给此GPU的任务
             db = SessionLocal()
             task = db.query(VideoTask).filter(
-                VideoTask.status == TaskStatus.RUNNING,
+                VideoTask.status.in_([TaskStatus.QUEUED, TaskStatus.INITIALIZING]),
                 VideoTask.gpu_id == gpu_id
             ).first()
 
@@ -466,8 +538,14 @@ async def worker_main(gpu_id):
                 else:
                     # 模型加载失败
                     task.status = TaskStatus.FAILED
-                    task.error_message = "模型加载失败"
+                    task.error_message = "模型加载失败，请检查日志了解详情"
                     db.commit()
+
+                    # 写入进度文件通知前端
+                    worker._write_progress_file(task.id, {
+                        'status': TaskStatus.FAILED,
+                        'error': "模型加载失败，请检查日志了解详情"
+                    })
 
                 running_task = None
 
@@ -477,7 +555,7 @@ async def worker_main(gpu_id):
             await asyncio.sleep(5)
 
         except Exception as e:
-            logger.error(f"Worker循环出错: {e}")
+            logger.error(f"Worker循环出错: {e}", exc_info=True)
             await asyncio.sleep(10)  # 错误后等待更长时间
 
     logger.info(f"GPU Worker {gpu_id} 退出")

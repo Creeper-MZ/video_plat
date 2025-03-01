@@ -463,18 +463,12 @@ async def run_video_generation(task_id: str, gpu_id: int, db: Session):
 
 
 async def notify_client(task_id: str, data: dict):
-    """直接传递进度更新，不做任何修改"""
     if task_id in active_connections:
         try:
-            # 直接发送原始数据，不做任何处理
             await active_connections[task_id].send_json(data)
-
-            # 记录日志
-            if 'progress' in data:
-                logger.info(f"WebSocket进度更新: {task_id} - {data['progress'] * 100:.1f}%")
+            logger.info(f"WebSocket 更新: 任务 {task_id} - 进度 {data.get('progress', 0) * 100:.1f}%")
         except Exception as e:
-            logger.error(f"WebSocket发送失败: {e}")
-            # 如果发送失败，移除连接
+            logger.error(f"WebSocket 发送失败: {e}")
             if task_id in active_connections:
                 del active_connections[task_id]
 

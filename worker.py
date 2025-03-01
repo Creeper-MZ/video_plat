@@ -34,103 +34,6 @@ running_task = None
 should_stop = False
 
 
-# 用于 denoising 阶段的进度更新。当前版本使用固定线性更新
-class RawTqdm:
-    def __init__(self, iterable):
-        self.iterable = list(iterable) if hasattr(iterable, '__len__') else list(iterable)
-        self.total = len(self.iterable)
-        self.task_id = None
-        self.last_log_time = time.time()
-        self.log_interval = 2  # 日志记录间隔（秒）
-        self.first_value = None
-        self.last_value = None
-        try:
-            first_item = self.iterable[0]
-            last_item = self.iterable[-1]
-            if hasattr(first_item, 'item'):
-                self.first_value = float(first_item.item())
-            else:
-                self.first_value = float(first_item)
-            if hasattr(last_item, 'item'):
-                self.last_value = float(last_item.item())
-            else:
-                self.last_value = float(last_item)
-        except Exception as e:
-            logger.error(f"无法解析 timesteps 数值: {e}")
-
-    def set_task_id(self, task_id):
-        self.task_id = task_id
-        return self
-
-    def __iter__(self):
-        current_index = 0
-        start_time = time.time()
-        for item in self.iterable:
-            yield item
-            current_index += 1
-
-            # 默认线性进度
-            p = current_index / self.total
-            # 尝试根据 timestep 数值计算进度（假设降序排列）
-            if self.first_value is not None and self.last_value is not None:
-                try:
-                    if hasattr(item, 'item'):
-                        current_val = float(item.item())
-                    else:
-                        current_val = float(item)
-                    p = (self.first_value - current_val) / (self.first_value - self.last_value)
-                    p = max(0, min(p, 1))
-                except Exception as e:
-                    logger.error(f"计算进度时出错: {e}")
-
-            overall_progress = p  # 这里直接使用 p，实际可以根据需要加 offset/scale
-
-            elapsed = time.time() - start_time
-            eta = elapsed / current_index * (self.total - current_index) if current_index > 0 else 0
-
-            now = time.time()
-            if now - self.last_log_time >= self.log_interval or current_index == 1 or current_index == self.total:
-                logger.info(f"去噪进度: {current_index}/{self.total} ({overall_progress * 100:.1f}%) [ETA: {eta:.1f}s]")
-                self.last_log_time = now
-
-            if self.task_id:
-                self.update_progress_sync(overall_progress, current_index, self.total, eta)
-
-    def update_progress_sync(self, progress, current, total, eta):
-        try:
-            db = SessionLocal()
-            try:
-                task = db.query(VideoTask).filter(VideoTask.id == self.task_id).first()
-                if task:
-                    task.progress = progress
-                    additional_info = task.additional_params or {}
-                    additional_info["step"] = current
-                    additional_info["total_steps"] = total
-                    additional_info["eta"] = eta
-                    task.additional_params = additional_info
-                    db.commit()
-            except Exception as e:
-                logger.error(f"更新数据库进度失败: {e}")
-            finally:
-                db.close()
-            try:
-                from app import notify_client
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(notify_client(self.task_id, {
-                    "status": "running",
-                    "progress": progress,
-                    "step": current,
-                    "total_steps": total,
-                    "eta": eta
-                }))
-                loop.close()
-            except Exception as e:
-                logger.error(f"发送 WebSocket 通知失败: {e}")
-        except Exception as e:
-            logger.error(f"进度更新失败: {e}")
-
-
 class GPUWorker:
     def __init__(self, gpu_id):
         self.gpu_id = gpu_id
@@ -216,7 +119,6 @@ class GPUWorker:
                 model_files,
                 torch_dtype=torch_dtype,
             )
-            # 注意：WanVideoPipeline 属于库代码，不能修改
             self.current_pipeline = WanVideoPipeline.from_model_manager(
                 self.model_manager,
                 torch_dtype=torch.bfloat16,
@@ -232,7 +134,7 @@ class GPUWorker:
         self.current_task = task
         db = SessionLocal()
         try:
-            # 更新任务状态为运行中，初始进度 0%
+            # 开始任务，进度 0%
             task.status = TaskStatus.RUNNING
             task.started_at = datetime.utcnow()
             task.progress = 0.0
@@ -243,12 +145,23 @@ class GPUWorker:
                 "progress": 0.0,
                 "message": "任务开始，正在加载模型及预处理"
             })
+
+            # 阶段 1: 模型加载和预处理 (0% - 10%)
             logger.info(f"开始加载模型: {task.id}")
             model_loaded = await self.load_model(task.type, task.resolution, task.model_precision)
             if not model_loaded:
                 raise Exception("模型加载失败")
-            # 预处理阶段完成后，更新进度到 10%
-            await notify_client(task.id, {"status": "running", "progress": 0.10, "message": "预处理完成，开始去噪"})
+
+            # 更新进度到 10%
+            task.progress = 0.10
+            db.commit()
+            await notify_client(task.id, {
+                "status": "running",
+                "progress": 0.10,
+                "message": "预处理完成，开始去噪"
+            })
+
+            # 准备生成参数
             width, height = self._get_resolution_dimensions(task.resolution)
             num_persistent_param = None if not task.save_vram else 0
             self.current_pipeline.enable_vram_management(num_persistent_param_in_dit=num_persistent_param)
@@ -265,19 +178,46 @@ class GPUWorker:
             if task.type == VideoType.IMAGE_TO_VIDEO and task.image_path:
                 input_image = Image.open(task.image_path)
                 generation_params["input_image"] = input_image
-            # 使用原有 RawTqdm 传递进度
-            generation_params["progress_bar_cmd"] = lambda x: RawTqdm(x).set_task_id(task.id)
+
+            # 阶段 2: 去噪过程 (10% - 80%)
+            def progress_callback(iterable):
+                total_steps = task.steps
+                for i, step in enumerate(iterable):
+                    # 去噪进度范围: 10% - 80%
+                    progress = 0.10 + (i / total_steps) * 0.70
+                    task.progress = progress
+                    db.commit()
+                    asyncio.run_coroutine_threadsafe(
+                        notify_client(task.id, {
+                            "status": "running",
+                            "progress": progress,
+                            "step": i + 1,
+                            "total_steps": total_steps
+                        }),
+                        asyncio.get_event_loop()
+                    )
+                    yield step
+
+            generation_params["progress_bar_cmd"] = progress_callback
             logger.info(f"开始生成视频: {task.id}")
             video = self.current_pipeline(**generation_params)
-            # 去噪及解码完成后，更新进度到 80%
-            await notify_client(task.id, {"status": "running", "progress": 0.80, "message": "去噪完成，正在后处理"})
+
+            # 阶段 3: 解码和后处理 (80% - 100%)
+            task.progress = 0.80
+            db.commit()
+            await notify_client(task.id, {
+                "status": "running",
+                "progress": 0.80,
+                "message": "去噪完成，正在后处理"
+            })
+
             logger.info(f"保存视频: {task.id}")
             from diffsynth import save_video
             save_video(video, task.output_path, fps=task.fps, quality=5)
-            # 添加 GPU 同步，确保视频写入完成
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
-            # 视频保存后，更新任务状态为完成（100%）
+
+            # 任务完成，进度 100%
             task.status = TaskStatus.COMPLETED
             task.progress = 1.0
             task.completed_at = datetime.utcnow()
@@ -287,6 +227,7 @@ class GPUWorker:
                 "progress": 1.0,
                 "output_url": f"/api/videos/{task.id}"
             })
+
             self.current_pipeline = None
             torch.cuda.empty_cache()
             logger.info(f"视频生成完成: {task.id}")
@@ -296,7 +237,6 @@ class GPUWorker:
             task.status = TaskStatus.FAILED
             task.error_message = str(e)
             db.commit()
-            from app import notify_client
             await notify_client(task.id, {
                 "status": "failed",
                 "error": str(e)

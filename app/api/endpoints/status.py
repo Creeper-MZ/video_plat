@@ -23,13 +23,30 @@ async def get_system_status():
     """
     Get system status including GPUs and queue
     """
-    gpu_status = gpu_manager.get_gpu_status()
-    queue_status = task_queue.get_queue_status()
-    
-    return {
-        "gpus": gpu_status,
-        "queue": queue_status
-    }
+    try:
+        # Ensure default values if retrieval fails
+        gpu_status = []
+        try:
+            gpu_status = gpu_manager.get_gpu_status()
+        except Exception as gpu_error:
+            logger.error(f"Error retrieving GPU status: {str(gpu_error)}")
+        
+        queue_status = {}
+        try:
+            queue_status = task_queue.get_queue_status()
+        except Exception as queue_error:
+            logger.error(f"Error retrieving queue status: {str(queue_error)}")
+        
+        return {
+            "gpus": gpu_status,
+            "queue": queue_status
+        }
+    except Exception as e:
+        logger.exception("Unexpected error in system status retrieval")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to retrieve system status: {str(e)}"
+        )
 
 @router.get("/config", response_model=Dict)
 async def get_system_config():

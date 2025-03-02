@@ -9,9 +9,9 @@ import os
 class TaskLogger:
     """Custom logger for video generation tasks"""
 
-    def __init__(self, task_id, debug=False):
+    def __init__(self, task_id, debug_mode=False):
         self.task_id = task_id
-        self.debug = debug
+        self.debug_mode = debug_mode
         self.logs = []
         self.progress = 0
         self.status = "initializing"
@@ -54,7 +54,7 @@ class TaskLogger:
     def debug(self, message):
         """Log debug message and add to log history if debug mode is on"""
         self.logger.debug(message)
-        if self.debug:
+        if self.debug_mode:  # 使用 debug_mode 而不是 debug
             self.logs.append({"level": "debug", "message": message, "time": datetime.now().isoformat()})
         return message
     

@@ -21,7 +21,7 @@ class Task:
     """
     Represents a video generation task
     """
-    def __init__(self, task_type: str, params: Dict[str, Any], debug: bool = False):
+    def __init__(self, task_type: str, params: Dict[str, Any], debug_mode: bool = False):
         self.id = str(uuid.uuid4())
         self.type = task_type  # 't2v' or 'i2v'
         self.params = params
@@ -35,7 +35,7 @@ class Task:
         self.progress = 0
         self.callback = None
         self.process = None
-        self.logger = TaskLogger(self.id, debug=debug)
+        self.logger = TaskLogger(self.id, debug_mode=debug_mode)
         
         # Save task information to disk
         self._save_task_info()
@@ -194,7 +194,7 @@ class TaskQueue:
             if len(self.queue) >= self.max_size:
                 raise ValueError(f"Queue is full (max size: {self.max_size})")
             
-            task = Task(task_type, params, debug=debug)
+            task = Task(task_type, params, debug_mode=debug)
             if callback:
                 task.callback = callback
             

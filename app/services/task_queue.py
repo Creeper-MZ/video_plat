@@ -21,6 +21,7 @@ class Task:
     """
     Represents a video generation task
     """
+
     def __init__(self, task_type: str, params: Dict[str, Any], debug_mode: bool = False):
         self.id = str(uuid.uuid4())
         self.type = task_type  # 't2v' or 'i2v'
@@ -35,8 +36,9 @@ class Task:
         self.progress = 0
         self.callback = None
         self.process = None
+        # 传递debug_mode而不是debug
         self.logger = TaskLogger(self.id, debug_mode=debug_mode)
-        
+
         # Save task information to disk
         self._save_task_info()
     
@@ -176,34 +178,36 @@ class TaskQueue:
             self._worker_thread.join(timeout=2.0)
             self._worker_thread = None
             logger.info("Task queue worker stopped")
-    
-    def add_task(self, task_type: str, params: Dict[str, Any], callback: Optional[Callable] = None, debug: bool = False) -> Task:
+
+    def add_task(self, task_type: str, params: Dict[str, Any], callback: Optional[Callable] = None,
+                 debug: bool = False) -> Task:
         """
         Add a task to the queue
-        
+
         Args:
             task_type: Type of task ('t2v' or 'i2v')
             params: Parameters for the task
             callback: Optional callback function to call when task completes
             debug: Enable debug logging for this task
-            
+
         Returns:
             The created Task object
         """
         with self.lock:
             if len(self.queue) >= self.max_size:
                 raise ValueError(f"Queue is full (max size: {self.max_size})")
-            
+
+            # 这里将debug参数传递给Task构造函数时，使用debug_mode=debug
             task = Task(task_type, params, debug_mode=debug)
             if callback:
                 task.callback = callback
-            
+
             self.queue.append(task)
             logger.info(f"Added task {task.id} to queue (position: {len(self.queue)})")
-            
+
             # Wake up the worker thread
             self.event.set()
-            
+
             return task
     
     def get_task(self, task_id: str) -> Optional[Task]:

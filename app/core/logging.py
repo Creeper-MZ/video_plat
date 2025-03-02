@@ -17,29 +17,29 @@ class TaskLogger:
         self.status = "initializing"
         self.current_step = 0
         self.total_steps = 0
-        
+
         # Set up file logging
         logs_dir = Path("logs")
         logs_dir.mkdir(exist_ok=True)
-        
+
         # Create timestamped log file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.log_file = logs_dir / f"task_{task_id}_{timestamp}.log"
-        
+
         # Configure logger
         self.logger = logging.getLogger(f"task_{task_id}")
-        self.logger.setLevel(logging.DEBUG if debug else logging.INFO)
-        
+        self.logger.setLevel(logging.DEBUG if debug_mode else logging.INFO)
+
         # Clear any existing handlers
         if self.logger.hasHandlers():
             self.logger.handlers.clear()
-            
+
         # File handler
         file_handler = logging.FileHandler(self.log_file)
         file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(file_format)
         self.logger.addHandler(file_handler)
-        
+
         # Console handler
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(file_format)
@@ -50,11 +50,11 @@ class TaskLogger:
         self.logger.info(message)
         self.logs.append({"level": "info", "message": message, "time": datetime.now().isoformat()})
         return message
-        
+
     def debug(self, message):
         """Log debug message and add to log history if debug mode is on"""
         self.logger.debug(message)
-        if self.debug_mode:  # 使用 debug_mode 而不是 debug
+        if self.debug_mode:  # 使用debug_mode
             self.logs.append({"level": "debug", "message": message, "time": datetime.now().isoformat()})
         return message
     

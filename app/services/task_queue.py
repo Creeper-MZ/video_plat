@@ -256,6 +256,77 @@ class TaskQueue:
                 "recent_completed": client_completed[-10:] if client_completed else []
             }
 
+    def get_all_tasks_with_privacy(self, client_id: str) -> Dict:
+        """
+        Get all tasks but with privacy measures for tasks not owned by the client
+
+        Args:
+            client_id: ID of the client
+
+        Returns:
+            Dictionary with all tasks but with limited information for tasks not owned by the client
+        """
+        with self.lock:
+            # Create privacy-filtered versions of task lists
+            queue_tasks = []
+            running_tasks = []
+            completed_tasks = []
+
+            # Process queued tasks
+            for task in self.queue:
+                if task.client_id == client_id:
+                    # Full info for owned tasks
+                    queue_tasks.append(task.to_dict())
+                else:
+                    # Limited info for non-owned tasks
+                    queue_tasks.append({
+                        "id": task.id,
+                        "type": task.type,
+                        "status": task.status,
+                        "progress": task.progress,
+                        "created_at": task.created_at.isoformat(),
+                        "client_id": task.client_id
+                    })
+
+            # Process running tasks
+            for task_id, task in self.running.items():
+                if task.client_id == client_id:
+                    running_tasks.append(task.to_dict())
+                else:
+                    running_tasks.append({
+                        "id": task.id,
+                        "type": task.type,
+                        "status": task.status,
+                        "progress": task.progress,
+                        "created_at": task.created_at.isoformat(),
+                        "started_at": task.started_at.isoformat() if task.started_at else None,
+                        "client_id": task.client_id
+                    })
+
+            # Process completed tasks
+            for task_id, task in self.completed.items():
+                if task.client_id == client_id:
+                    completed_tasks.append(task.to_dict())
+                else:
+                    completed_tasks.append({
+                        "id": task.id,
+                        "type": task.type,
+                        "status": task.status,
+                        "progress": task.progress,
+                        "created_at": task.created_at.isoformat(),
+                        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                        "client_id": task.client_id
+                    })
+
+            return {
+                "queue_length": len(self.queue),
+                "running_tasks": len(self.running),
+                "completed_tasks": len(self.completed),
+                "queue": queue_tasks,
+                "running": running_tasks,
+                "recent_completed": completed_tasks[-10:] if completed_tasks else []
+            }
+
     def get_task(self, task_id: str) -> Optional[Task]:
         """
         Get a task by ID

@@ -4,7 +4,7 @@ import os
 import logging
 import uuid
 from typing import Optional
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends, Request, Query
 from fastapi.responses import JSONResponse
 import json
 from datetime import datetime
@@ -182,7 +182,13 @@ async def get_task_progress(task_id: str, client_id: str = Depends(get_client_id
 
     # Check if task belongs to the current client
     if task_info.get("client_id") and task_info.get("client_id") != client_id:
-        raise HTTPException(status_code=403, detail="You do not have permission to view this task")
+        # Allow progress viewing for non-owners, but limit information
+        return {
+            "status": task_info["status"],
+            "progress": task_info["progress"],
+            "current_step": task_info.get("current_step", 0),
+            "total_steps": task_info.get("total_steps", 0)
+        }
 
     return {
         "status": task_info["status"],
@@ -293,8 +299,21 @@ async def get_task_status(task_id: str, client_id: str = Depends(get_client_id))
 
     # Check if task belongs to the current client
     if task_info.get("client_id") and task_info.get("client_id") != client_id:
-        raise HTTPException(status_code=403, detail="You do not have permission to view this task")
+        # For non-owners, return limited information
+        limited_info = {
+            "id": task_info["id"],
+            "type": task_info["type"],
+            "status": task_info["status"],
+            "progress": task_info["progress"],
+            "created_at": task_info["created_at"],
+            "started_at": task_info["started_at"],
+            "completed_at": task_info["completed_at"],
+            "client_id": task_info["client_id"]
+            # Sensitive data like params, logs, and result are not included
+        }
+        return limited_info
 
+    # Return full details for the owner
     return task_info
 
 
@@ -319,8 +338,14 @@ async def cancel_task(task_id: str, client_id: str = Depends(get_client_id)):
 
 
 @router.get("/queue", response_model=dict)
-async def get_queue_status(client_id: str = Depends(get_client_id)):
+async def get_queue_status(
+        client_id: str = Depends(get_client_id),
+        show_all: bool = Query(False, description="Show all tasks with limited info for non-owned tasks")
+):
     """
-    Get status of the task queue for the current client
+    Get status of the task queue for the current client or all tasks
     """
-    return task_queue.get_client_tasks(client_id)
+    if show_all:
+        return task_queue.get_all_tasks_with_privacy(client_id)
+    else:
+        return task_queue.get_client_tasks(client_id)

@@ -17,12 +17,13 @@ from ..core.logging import TaskLogger
 
 logger = logging.getLogger("videoGenPlatform")
 
+
 class Task:
     """
     Represents a video generation task
     """
 
-    def __init__(self, task_type: str, params: Dict[str, Any], debug_mode: bool = False):
+    def __init__(self, task_type: str, params: Dict[str, Any], debug_mode: bool = False, user_id: str = None):
         self.id = str(uuid.uuid4())
         self.type = task_type  # 't2v' or 'i2v'
         self.params = params
@@ -36,17 +37,17 @@ class Task:
         self.progress = 0
         self.callback = None
         self.process = None
-        # 传递debug_mode而不是debug
+        self.user_id = user_id  # 添加用户ID
         self.logger = TaskLogger(self.id, debug_mode=debug_mode)
 
         # Save task information to disk
         self._save_task_info()
-    
+
     def _save_task_info(self):
         """Save task information to disk"""
         tasks_dir = Path("tasks")
         tasks_dir.mkdir(exist_ok=True)
-        
+
         task_info = {
             "id": self.id,
             "type": self.type,
@@ -56,9 +57,10 @@ class Task:
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "status": self.status,
             "progress": self.progress,
-            "gpu_id": self.gpu_id
+            "gpu_id": self.gpu_id,
+            "user_id": self.user_id  # 保存用户ID
         }
-        
+
         with open(tasks_dir / f"{self.id}.json", "w") as f:
             json.dump(task_info, f, indent=2)
     
@@ -146,6 +148,7 @@ class Task:
             "gpu_id": self.gpu_id,
             "result": self.result,
             "error": self.error,
+            "user_id": self.user_id,  # 添加用户ID
             "params": {k: str(v) if isinstance(v, (Path, bytes)) else v for k, v in self.params.items() if k != "image_data"}
         }
 
@@ -182,8 +185,8 @@ class TaskQueue:
             self._worker_thread = None
             logger.info("Task queue worker stopped")
 
-    def add_task(self, task_type: str, params: Dict[str, Any], callback: Optional[Callable] = None,
-                 debug: bool = False) -> Task:
+    def add_task(self, task_type: str, params: Dict[str, Any], callback: Optional[Callable] = None, debug: bool = False,
+                 user_id: str = None) -> Task:
         """
         Add a task to the queue
 
@@ -192,6 +195,7 @@ class TaskQueue:
             params: Parameters for the task
             callback: Optional callback function to call when task completes
             debug: Enable debug logging for this task
+            user_id: 用户ID，用于标识任务所有者
 
         Returns:
             The created Task object
@@ -200,8 +204,7 @@ class TaskQueue:
             if len(self.queue) >= self.max_size:
                 raise ValueError(f"Queue is full (max size: {self.max_size})")
 
-            # 这里将debug参数传递给Task构造函数时，使用debug_mode=debug
-            task = Task(task_type, params, debug_mode=debug)
+            task = Task(task_type, params, debug_mode=debug, user_id=user_id)
             if callback:
                 task.callback = callback
 
@@ -268,24 +271,58 @@ class TaskQueue:
             return True
         
         return False
-    
-    def get_queue_status(self) -> Dict:
+    def get_user_tasks_count(self, user_id: str) -> int:
+        """
+        计算用户当前的活跃任务数（队列中+运行中）
+
+        Args:
+            user_id: 用户ID
+
+        Returns:
+            活跃任务数
+        """
+        with self.lock:
+            queued_count = sum(1 for task in self.queue if task.user_id == user_id)
+            running_count = sum(1 for task_id, task in self.running.items() if task.user_id == user_id)
+            return queued_count + running_count
+
+    def get_queue_status(self, user_id: Optional[str] = None) -> Dict:
         """
         Get the current status of the queue
-        
+
+        Args:
+            user_id: 可选的用户ID，如果提供则只返回该用户的任务
+
         Returns:
             Dictionary with queue status information
         """
         with self.lock:
-            return {
-                "queue_length": len(self.queue),
-                "running_tasks": len(self.running),
-                "completed_tasks": len(self.completed),
-                "queue": [task.to_dict() for task in self.queue],
-                "running": [task.to_dict() for task in self.running.values()],
-                "recent_completed": [task.to_dict() for task in list(self.completed.values())[-10:]]
-            }
-    
+            if user_id:
+                # 只返回指定用户的任务
+                user_queue = [task for task in self.queue if task.user_id == user_id]
+                user_running = {tid: task for tid, task in self.running.items() if task.user_id == user_id}
+                user_completed = {tid: task for tid, task in self.completed.items() if task.user_id == user_id}
+
+                return {
+                    "queue_length": len(user_queue),
+                    "running_tasks": len(user_running),
+                    "completed_tasks": len(user_completed),
+                    "queue": [task.to_dict() for task in user_queue],
+                    "running": [task.to_dict() for task in user_running.values()],
+                    "recent_completed": [task.to_dict() for task in list(user_completed.values())[-10:]]
+                }
+            else:
+                # 返回所有任务
+                return {
+                    "queue_length": len(self.queue),
+                    "running_tasks": len(self.running),
+                    "completed_tasks": len(self.completed),
+                    "queue": [task.to_dict() for task in self.queue],
+                    "running": [task.to_dict() for task in self.running.values()],
+                    "recent_completed": [task.to_dict() for task in list(self.completed.values())[-10:]]
+                }
+
+
     def get_task_details(self, task_id: str) -> Optional[Dict]:
         """Get detailed information about a task"""
         task = self.get_task(task_id)

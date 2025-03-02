@@ -402,6 +402,12 @@ class VideoGenerator:
         # Initialize progress handler
         progress_handler = ProgressHandler(self.task)
 
+        # 添加更多详细日志
+        self.logger.info("Starting image-to-video generation")
+        self.logger.info(f"Loading models from {model_config['model_path']}")
+        self.logger.info(
+            f"Generation parameters: Resolution: {width}x{height}, Frames: {self.params.get('num_frames')}, Steps: {self.params.get('steps')}")
+
         # Parameters
         prompt = self.params.get("prompt", "")
         negative_prompt = self.params.get("negative_prompt", settings.default_negative_prompt)
@@ -409,16 +415,13 @@ class VideoGenerator:
         fps = self.params.get("fps", settings.default_fps)
         steps = self.params.get("steps", settings.default_steps)
         shift = self.params.get("shift", settings.default_shift)
-        guide_scale = self.params.get("guide_scale", settings.default_guide_scale)
+        guide_scale = self.params.get("cfg_scale", settings.default_cfg_scale)
         seed = self.params.get("seed", settings.default_seed)
         use_fp8 = self.params.get("use_fp8", settings.default_use_fp8)
         save_vram = self.params.get("save_vram", settings.default_save_vram)
 
         try:
             self.logger.info("Initializing ModelManager for I2V")
-            self.logger.info(f"Loading models from {model_config['model_path']}")
-            self.logger.info(
-                f"Generation parameters: Resolution: {width}x{height}, Frames: {num_frames}, Steps: {steps}")
 
             # Create a Python script to run the generation
             if self.temp_dir is None:
@@ -577,7 +580,51 @@ class VideoGenerator:
             # 收集所有stdout和stderr输出
             stdout_lines = []
             stderr_lines = []
+            # 更健壮的进度解析，使用正则表达式
+            import re
+            progress_pattern = re.compile(r'PROGRESS:(\d+):(\d+)')
 
+            # 为stderr创建非阻塞读取器
+            import select
+            import fcntl
+            import os
+
+            # 设置非阻塞模式
+            fl = fcntl.fcntl(process.stderr, fcntl.F_GETFL)
+            fcntl.fcntl(process.stderr, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+
+            # 定期检查进度
+            poll_obj = select.poll()
+            poll_obj.register(process.stderr, select.POLLIN)
+
+            # 如果10秒内没有进度更新，主动更新一下进度
+            last_progress_time = time.time()
+            last_progress = 0
+
+            while process.poll() is None:  # 当进程仍在运行时
+                # 检查是否有新的stderr输出
+                if poll_obj.poll(100):  # 100ms超时
+                    try:
+                        line = process.stderr.readline()
+                        if line:
+                            stderr_lines.append(line)
+                            self.logger.info(f"Process stderr: {line.strip()}")
+
+                            # 检查进度信息
+                            match = progress_pattern.search(line)
+                            if match:
+                                current, total = int(match.group(1)), int(match.group(2))
+                                self.logger.info(f"进度解析成功: {current}/{total}")
+                                progress_handler.update(current, total)
+                                last_progress_time = time.time()
+                                last_progress = current
+                    except (IOError, select.error):
+                        # 读取错误，忽略并继续
+                        pass
+
+
+                # 短暂休眠，避免CPU占用过高
+                time.sleep(0.1)
             # 跟踪进度
             for line in iter(process.stderr.readline, ''):
                 stderr_lines.append(line)

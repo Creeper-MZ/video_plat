@@ -225,31 +225,41 @@ def create_app(debug=False):
     
     return app
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Wan2.1 Video Generation Platform")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to listen on")
     parser.add_argument("--port", type=int, default=8000, help="Port to listen on")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--reload", action="store_true", help="Enable auto reload")
+    # 添加每用户任务数量限制参数
+    parser.add_argument("--task_per_user", type=int, default=2, help="Maximum number of tasks per user (default: 2)")
     return parser.parse_args()
+
 
 if __name__ == "__main__":
     args = parse_args()
-    
+
+    # 更新设置
+    from app.core.config import update_settings_from_args
+
+    update_settings_from_args(args)
+
     # 直接运行app实例，不使用工厂函数
     app = create_app(debug=args.debug)
-    
+
     # 输出启动信息
     paths = get_project_paths()
     print(f"Starting server on http://{args.host}:{args.port}")
     print(f"Static files directory: {paths['static_dir']}")
     print(f"API documentation: http://{args.host}:{args.port}/docs")
-    
+    print(f"Max tasks per user: {args.task_per_user}")
+
     # 检查index.html是否存在
     if not os.path.exists(paths["index_html_path"]):
         print(f"Warning: index.html not found at {paths['index_html_path']}")
         print("A basic HTML page will be generated instead.")
-    
+
     # 启动服务器
     uvicorn.run(
         app,

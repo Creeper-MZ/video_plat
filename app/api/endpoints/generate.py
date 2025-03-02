@@ -6,14 +6,81 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 import json
+from datetime import datetime
 
 from ...models.schemas import T2VRequest, I2VRequest, GenerationResponse, ErrorResponse, TaskStatus
 from ...services.task_queue import task_queue
 from ...core.config import settings
-from ...core.logging import setup_app_logger
+from ...utils.helpers import ensure_directory_exists
 
 router = APIRouter()
 logger = logging.getLogger("videoGenPlatform")
+
+def validate_resolution(resolution: str):
+    """验证分辨率格式和有效性"""
+    if resolution not in settings.resolution_map:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid resolution: {resolution}. Available options: {', '.join(settings.resolution_map.keys())}"
+        )
+    return resolution
+
+def validate_num_frames(num_frames: int):
+    """验证并调整帧数为4n+1格式"""
+    if num_frames < 5:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Number of frames must be at least 5. Got {num_frames}"
+        )
+    
+    if num_frames % 4 != 1:
+        original = num_frames
+        # 调整为最接近的4n+1
+        num_frames = ((num_frames - 1) // 4) * 4 + 1
+        logger.warning(f"Adjusted num_frames from {original} to {num_frames} (must be 4n+1)")
+    
+    return num_frames
+
+def validate_steps(steps: int):
+    """验证并限制采样步数在允许范围内"""
+    if steps < 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Sampling steps must be positive. Got {steps}"
+        )
+    
+    original = steps
+    steps = max(min(steps, settings.max_steps), settings.min_steps)
+    
+    if steps != original:
+        logger.warning(f"Adjusted steps from {original} to {steps} (min: {settings.min_steps}, max: {settings.max_steps})")
+    
+    return steps
+
+def validate_fps(fps: int):
+    """验证帧率在合理范围内"""
+    if fps < 1 or fps > 60:
+        raise HTTPException(
+            status_code=400,
+            detail=f"FPS must be between 1 and 60. Got {fps}"
+        )
+    return fps
+
+def validate_prompt(prompt: str):
+    """验证提示词不为空且长度合理"""
+    if not prompt or not prompt.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Prompt cannot be empty"
+        )
+    
+    if len(prompt) > 10000:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Prompt is too long ({len(prompt)} chars). Maximum length is 10000 characters"
+        )
+        
+    return prompt.strip()
 
 @router.post("/t2v", response_model=GenerationResponse)
 async def text_to_video(
@@ -24,34 +91,20 @@ async def text_to_video(
     Generate a video from text prompt
     """
     try:
-        # Validate parameters
-        num_frames = request.basic.num_frames
-        if num_frames % 4 != 1:
-            # Round to nearest 4n+1
-            num_frames = ((num_frames - 1) // 4) * 4 + 1
-            logger.warning(f"Adjusted num_frames to {num_frames} (must be 4n+1)")
-        
-        # Check if steps is within range
-        steps = max(min(request.basic.steps, settings.max_steps), settings.min_steps)
-        if steps != request.basic.steps:
-            logger.warning(f"Adjusted steps to {steps} (min: {settings.min_steps}, max: {settings.max_steps})")
-        
-        # Parse resolution
-        resolution = request.basic.resolution
-        if resolution not in settings.resolution_map:
-            raise HTTPException(status_code=400, detail=f"Invalid resolution: {resolution}")
-        
-        # Check if prompt is empty
-        if not request.basic.prompt.strip():
-            raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+        # 验证所有输入参数
+        prompt = validate_prompt(request.basic.prompt)
+        num_frames = validate_num_frames(request.basic.num_frames)
+        steps = validate_steps(request.basic.steps)
+        fps = validate_fps(request.basic.fps)
+        resolution = validate_resolution(request.basic.resolution)
         
         # Create task parameters
         params = {
-            "prompt": request.basic.prompt,
+            "prompt": prompt,
             "negative_prompt": request.basic.negative_prompt or settings.default_negative_prompt,
             "resolution": resolution,
             "num_frames": num_frames,
-            "fps": request.basic.fps,
+            "fps": fps,
             "steps": steps,
             "shift": request.basic.shift or settings.default_shift,
             "guide_scale": request.basic.guide_scale,
@@ -81,6 +134,9 @@ async def text_to_video(
             message="Task added to queue"
         )
     
+    except HTTPException:
+        # 直接传递HTTP异常
+        raise
     except Exception as e:
         logger.exception(f"Error adding T2V task: {str(e)}")
         raise HTTPException(
@@ -108,6 +164,13 @@ async def image_to_video(
     Generate a video from image and text prompt
     """
     try:
+        # Validate input parameters
+        prompt = validate_prompt(prompt)
+        num_frames = validate_num_frames(num_frames)
+        steps = validate_steps(steps)
+        fps = validate_fps(fps)
+        resolution = validate_resolution(resolution)
+        
         # Check if prompt is empty
         if not prompt.strip():
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
@@ -123,19 +186,6 @@ async def image_to_video(
         image_data = await image.read()
         if len(image_data) > MAX_SIZE:
             raise HTTPException(status_code=400, detail=f"Image file is too large (max 10MB). Got {len(image_data) // (1024*1024)}MB")
-            
-        # Validate parameters
-        if num_frames % 4 != 1:
-            # Round to nearest 4n+1
-            num_frames = ((num_frames - 1) // 4) * 4 + 1
-            logger.warning(f"Adjusted num_frames to {num_frames} (must be 4n+1)")
-        
-        # Check if steps is within range
-        steps = max(min(steps, settings.max_steps), settings.min_steps)
-        
-        # Parse resolution
-        if resolution not in settings.resolution_map:
-            raise HTTPException(status_code=400, detail=f"Invalid resolution: {resolution}")
         
         # Create task parameters
         params = {
@@ -162,6 +212,9 @@ async def image_to_video(
             message="Task added to queue"
         )
     
+    except HTTPException:
+        # Pass HTTP exceptions directly
+        raise
     except Exception as e:
         logger.exception(f"Error adding I2V task: {str(e)}")
         raise HTTPException(

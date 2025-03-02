@@ -512,7 +512,6 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
 
 
-
 <script>
 // Global variables
 let currentTaskId = null;
@@ -535,31 +534,6 @@ document.addEventListener('DOMContentLoaded', function() {
         localStorage.setItem('clientId', clientId);
     }
     console.log("Using client ID:", clientId);
-
-    // Add CSS to head for task ownership styling
-    const styleElement = document.createElement('style');
-    styleElement.textContent = `
-        .other-user-task {
-            background-color: #f8f9fa;
-            position: relative;
-        }
-        .other-user-task:after {
-            content: "\\f023";
-            font-family: "Font Awesome 5 Free";
-            font-weight: 900;
-            position: absolute;
-            right: 10px;
-            bottom: 10px;
-            color: #6c757d;
-            font-size: 0.8rem;
-        }
-        .privacy-notice {
-            background-color: #fff3cd;
-            border-color: #ffecb5;
-            color: #664d03;
-        }
-    `;
-    document.head.appendChild(styleElement);
 
     // 图片预览
     document.getElementById('i2vImage').addEventListener('change', function(e) {
@@ -607,15 +581,6 @@ document.addEventListener('DOMContentLoaded', function() {
             cancelTask(currentTaskId);
         }
     });
-
-    // Task visibility toggle - add this checkbox to your HTML
-    // in the Tasks List card header section
-    const showAllTasksSwitch = document.getElementById('showAllTasksSwitch');
-    if (showAllTasksSwitch) {
-        showAllTasksSwitch.addEventListener('change', function() {
-            fetchSystemStatus();
-        });
-    }
 
     // 显示加载模态框
     const loadingModal = new bootstrap.Modal(document.getElementById('loadingModal'));
@@ -848,14 +813,7 @@ function submitI2VForm() {
 function fetchSystemStatus() {
     console.log("开始获取系统状态...");
 
-    // Check if the show all tasks switch exists and is checked
-    const showAllTasksSwitch = document.getElementById('showAllTasksSwitch');
-    const showAllTasks = showAllTasksSwitch ? showAllTasksSwitch.checked : false;
-
-    // Use the appropriate endpoint
-    const url = showAllTasks ? '/api/queue?show_all=true' : '/api/queue';
-
-    return fetch(url, addClientIdHeader())
+    return fetch('/api/status/system', addClientIdHeader())
         .then(response => {
             console.log("系统状态响应码:", response.status);
 
@@ -1013,19 +971,8 @@ function updateTaskLists(queueData) {
 
     // 添加任务项点击事件
     document.querySelectorAll('.task-list-item').forEach(item => {
-        item.addEventListener('click', function(e) {
+        item.addEventListener('click', function() {
             const taskId = this.getAttribute('data-task-id');
-            const isOwner = this.getAttribute('data-is-owner') === 'true';
-
-            if (!isOwner) {
-                // Show a warning before opening non-owned task
-                const confirmed = confirm('您不是此任务的创建者，任务详情内容将被隐藏。是否继续查看？');
-                if (!confirmed) {
-                    e.preventDefault();
-                    return;
-                }
-            }
-
             openTaskDetail(taskId);
         });
     });
@@ -1054,24 +1001,13 @@ function getTaskListItemHtml(task) {
             statusBadge = `<span class="badge bg-secondary">${task.status}</span>`;
     }
 
-    // Check if this task belongs to the current user
-    const isOwner = task.client_id === clientId;
-
-    // For task content preview, show placeholder text if not the owner
-    const contentPreview = isOwner
-        ? (task.params && task.params.prompt ? task.params.prompt : '无提示词')
-        : '（内容已隐藏）';
-
-    // Add a class to indicate ownership
-    const ownershipClass = isOwner ? 'user-owned-task' : 'other-user-task';
-
     return `
-    <a href="#" class="list-group-item list-group-item-action task-list-item ${ownershipClass}" data-task-id="${task.id}" data-is-owner="${isOwner}">
+    <a href="#" class="list-group-item list-group-item-action task-list-item" data-task-id="${task.id}">
         <div class="d-flex w-100 justify-content-between">
             <h6 class="mb-1">任务 ${task.id.substring(0, 8)}...</h6>
             ${statusBadge}
         </div>
-        <p class="mb-1 small text-truncate">${contentPreview}</p>
+        <p class="mb-1 small text-truncate">${task.params && task.params.prompt ? task.params.prompt : '无提示词'}</p>
         <div class="d-flex w-100 justify-content-between align-items-center">
             <small class="text-muted">${formatTimestamp(task.created_at)}</small>
             ${task.status === 'running' ? `<div class="small">${task.progress}%</div>` : ''}
@@ -1112,8 +1048,7 @@ function fetchTaskDetail(taskId) {
                     throw new Error('任务未找到');
                 }
                 if (response.status === 403) {
-                    // Handle permission error differently
-                    throw new Error('没有权限查看此任务详情');
+                    throw new Error('没有权限查看此任务');
                 }
                 return response.json().then(data => {
                     throw new Error(data.detail || '获取任务详情失败');
@@ -1122,114 +1057,23 @@ function fetchTaskDetail(taskId) {
             return response.json();
         })
         .then(data => {
-            // Check if the user is the owner of this task
-            const isOwner = data.client_id === clientId;
-
-            if (isOwner) {
-                // Display full details for task owner
-                updateTaskDetail(data);
-            } else {
-                // Display limited details for non-owners
-                updateLimitedTaskDetail(data);
-            }
+            updateTaskDetail(data);
         })
         .catch(error => {
             console.error(`获取任务 ${taskId} 出错:`, error);
 
             if (taskRefreshInterval &&
                 (error.message.includes('未找到') || error.message.includes('没有权限'))) {
-                // Task might be deleted or access denied, stop refreshing
+                // 任务可能已被删除或无权访问，停止刷新
                 clearInterval(taskRefreshInterval);
                 taskRefreshInterval = null;
                 showToast('错误', error.message, 'error');
 
-                // Close task detail panel if permission denied
-                if (error.message.includes('没有权限')) {
-                    document.getElementById('taskDetailPanel').style.display = 'none';
-                    currentTaskId = null;
-                }
+                // 关闭任务详情面板
+                document.getElementById('taskDetailPanel').style.display = 'none';
+                currentTaskId = null;
             }
         });
-}
-
-// New function to display limited details for non-owners
-function updateLimitedTaskDetail(task) {
-    // Update the basic information
-    document.getElementById('detailTaskId').textContent = task.id;
-    document.getElementById('detailTaskType').textContent = task.type.toUpperCase();
-
-    // Update status badge
-    const statusEl = document.getElementById('detailTaskStatus');
-    statusEl.textContent = getStatusText(task.status);
-    statusEl.className = 'badge';
-
-    switch (task.status) {
-        case 'queued':
-            statusEl.classList.add('bg-secondary');
-            break;
-        case 'running':
-            statusEl.classList.add('bg-primary');
-            break;
-        case 'completed':
-            statusEl.classList.add('bg-success');
-            break;
-        case 'failed':
-            statusEl.classList.add('bg-danger');
-            break;
-        case 'cancelled':
-            statusEl.classList.add('bg-warning', 'text-dark');
-            break;
-        default:
-            statusEl.classList.add('bg-secondary');
-    }
-
-    // Update timestamp display
-    document.getElementById('detailTaskCreated').textContent = formatTimestamp(task.created_at);
-    document.getElementById('detailTaskStarted').textContent = formatTimestamp(task.started_at);
-    document.getElementById('detailTaskCompleted').textContent = formatTimestamp(task.completed_at);
-
-    // Update progress bar
-    const progressBar = document.getElementById('taskProgressBar').querySelector('.progress-bar');
-    progressBar.style.width = `${task.progress}%`;
-    progressBar.textContent = `${task.progress}%`;
-
-    // Replace sensitive content with privacy message
-    document.getElementById('detailTaskParams').textContent = "（任务参数已隐藏）";
-
-    // Hide logs for non-owners
-    const logsContainer = document.getElementById('detailTaskLogs');
-    logsContainer.innerHTML = '<p class="text-center text-muted">（任务日志已隐藏）</p>';
-
-    // Hide result preview for non-owners
-    document.getElementById('resultPreviewContainer').style.display = 'none';
-    document.getElementById('downloadResultBtn').style.display = 'none';
-
-    // Hide cancel button for non-owners
-    document.getElementById('cancelTaskBtn').style.display = 'none';
-
-    // Add a privacy notice at the top of the panel
-    const detailPanel = document.getElementById('taskDetailPanel');
-
-    // Remove any existing notice
-    const existingNotice = detailPanel.querySelector('.privacy-notice');
-    if (existingNotice) {
-        existingNotice.remove();
-    }
-
-    // Add new notice
-    const noticeDiv = document.createElement('div');
-    noticeDiv.className = 'alert alert-warning privacy-notice mb-3';
-    noticeDiv.innerHTML = '<i class="fas fa-lock me-2"></i>此任务内容已隐藏（您不是任务创建者）';
-
-    // Insert after the header
-    const cardBody = detailPanel.querySelector('.card-body');
-    cardBody.insertBefore(noticeDiv, cardBody.firstChild);
-
-    // If task is completed/failed/cancelled, stop refreshing
-    if (['completed', 'failed', 'cancelled'].includes(task.status) && taskRefreshInterval) {
-        clearInterval(taskRefreshInterval);
-        taskRefreshInterval = null;
-    }
 }
 
 // 更新任务详情
@@ -1275,13 +1119,6 @@ function updateTaskDetail(task) {
 
     // 参数
     document.getElementById('detailTaskParams').textContent = JSON.stringify(task.params, null, 2);
-
-    // 移除任何已存在的隐私提示
-    const detailPanel = document.getElementById('taskDetailPanel');
-    const existingNotice = detailPanel.querySelector('.privacy-notice');
-    if (existingNotice) {
-        existingNotice.remove();
-    }
 
     // 日志
     const logsContainer = document.getElementById('detailTaskLogs');

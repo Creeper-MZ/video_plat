@@ -3,7 +3,7 @@
 import os
 import logging
 from typing import Optional
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends,Header
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 import json
 from datetime import datetime
@@ -12,6 +12,7 @@ from ...models.schemas import T2VRequest, I2VRequest, GenerationResponse, ErrorR
 from ...services.task_queue import task_queue
 from ...core.config import settings
 from ...utils.helpers import ensure_directory_exists
+
 router = APIRouter()
 logger = logging.getLogger("videoGenPlatform")
 
@@ -83,9 +84,8 @@ def validate_prompt(prompt: str):
 
 @router.post("/t2v", response_model=GenerationResponse)
 async def text_to_video(
-        request: T2VRequest,
-        background_tasks: BackgroundTasks,
-        user_id: str = Header(..., description="唯一用户标识符")
+    request: T2VRequest,
+    background_tasks: BackgroundTasks
 ):
     """
     Generate a video from text prompt
@@ -107,10 +107,9 @@ async def text_to_video(
             "fps": fps,
             "steps": steps,
             "shift": request.basic.shift or settings.default_shift,
-            "cfg_scale": request.basic.guide_scale,
+            "guide_scale": request.basic.guide_scale,
             "seed": request.basic.seed,
             "use_fp8": request.basic.use_fp8,
-            "user_id": user_id  # 添加用户ID
         }
         
         # Add advanced parameters if provided
@@ -124,15 +123,11 @@ async def text_to_video(
                 "save_vram": settings.default_save_vram,
                 "debug": False
             })
-        if task_queue.get_user_tasks_count(user_id) >= settings.max_tasks_per_user:
-            raise HTTPException(
-                status_code=429,
-                detail=f"已达到每用户最大任务数 ({settings.max_tasks_per_user}). 请等待现有任务完成。"
-            )
+        
         # Add task to queue
         debug_mode = request.advanced.debug if request.advanced else False
-        task = task_queue.add_task("t2v", params, debug=debug_mode, user_id=user_id)
-
+        task = task_queue.add_task("t2v", params, debug=debug_mode)
+        
         return GenerationResponse(
             task_id=task.id,
             status="queued",
@@ -179,8 +174,7 @@ async def image_to_video(
     use_fp8: bool = Form(True),
     save_vram: bool = Form(False),
     debug: bool = Form(False),
-    image: UploadFile = File(...),
-    user_id: str = Header(..., description="唯一用户标识符")
+    image: UploadFile = File(...)
 ):
     """
     Generate a video from image and text prompt
@@ -222,14 +216,9 @@ async def image_to_video(
             "seed": seed,
             "use_fp8": use_fp8,
             "save_vram": save_vram,
-            "image_data": image_data,
-            "user_id": user_id
+            "image_data": image_data
         }
-        if task_queue.get_user_tasks_count(user_id) >= settings.max_tasks_per_user:
-            raise HTTPException(
-                status_code=429,
-                detail=f"已达到每用户最大任务数 ({settings.max_tasks_per_user}). 请等待现有任务完成。"
-            )
+        
         # Add task to queue
         task = task_queue.add_task("i2v", params, debug=debug)
         
@@ -249,52 +238,31 @@ async def image_to_video(
             detail=f"Failed to create I2V task: {str(e)}"
         )
 
-
 @router.get("/task/{task_id}", response_model=dict)
-async def get_task_status(
-        task_id: str,
-        user_id: str = Header(..., description="唯一用户标识符")
-):
+async def get_task_status(task_id: str):
     """
-    获取任务状态，只允许查看自己的任务
+    Get status of a task
     """
     task_info = task_queue.get_task_details(task_id)
     if not task_info:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-
-    # 检查任务是否属于当前用户
-    if task_info.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="您无权查看此任务")
-
+    
     return task_info
 
-
 @router.delete("/task/{task_id}", response_model=dict)
-async def cancel_task(
-        task_id: str,
-        user_id: str = Header(..., description="唯一用户标识符")
-):
+async def cancel_task(task_id: str):
     """
-    取消任务，只允许取消自己的任务
+    Cancel a running or queued task
     """
-    # 先检查任务是否存在并属于当前用户
-    task_info = task_queue.get_task_details(task_id)
-    if not task_info:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-
-    if task_info.get("user_id") != user_id:
-        raise HTTPException(status_code=403, detail="您无权取消此任务")
-
     success = task_queue.cancel_task(task_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found or cannot be cancelled")
-
+    
     return {"status": "cancelled", "message": f"Task {task_id} cancelled successfully"}
 
-async def get_queue_status(
-    user_id: str = Header(..., description="唯一用户标识符")
-):
+@router.get("/queue", response_model=dict)
+async def get_queue_status():
     """
-    获取队列状态，只返回自己的任务
+    Get status of the task queue
     """
-    return task_queue.get_queue_status(user_id=user_id)
+    return task_queue.get_queue_status()

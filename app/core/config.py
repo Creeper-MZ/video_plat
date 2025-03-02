@@ -3,7 +3,7 @@
 import os
 from typing import Dict, List, Optional, Union
 from pydantic import BaseModel, Field
-import logging
+
 class ModelConfig(BaseModel):
     model_path: str
     type: str
@@ -19,16 +19,15 @@ class GPUConfig(BaseModel):
     vram_total: Optional[int] = None
     utilization: Optional[float] = None
 
-
 class Settings(BaseModel):
     debug: bool = False
     api_title: str = "Wan2.1 Video Generation Platform"
     api_description: str = "Generate videos from text or images using Wan2.1 models"
     api_version: str = "0.1.0"
-
+    
     # Output directory for generated videos
     output_dir: str = "app/static/videos"
-
+    
     # Model paths
     models: Dict[str, ModelConfig] = {
         "wan2.1-t2v-14b": ModelConfig(
@@ -47,7 +46,7 @@ class Settings(BaseModel):
             resolutions=["1280x720", "720x1280"]
         )
     }
-
+    
     # Default parameters
     default_resolution: str = "832x480"  # 480P landscape
     default_frame_num: int = 81  # Must be 4n+1
@@ -56,13 +55,13 @@ class Settings(BaseModel):
     min_steps: int = 20
     max_steps: int = 60
     default_shift: float = 5.0
-    default_cfg_scale: float = 5.0  # 更改为cfg_scale
+    default_guide_scale: float = 5.0
     default_use_fp8: bool = True
     default_seed: int = -1  # Random seed
-
+    
     # Default negative prompt (extracted from your code examples)
     default_negative_prompt: str = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
-
+    
     # GPU management
     gpu_devices: List[GPUConfig] = [
         GPUConfig(device_id=0, vram=48),
@@ -70,18 +69,15 @@ class Settings(BaseModel):
         GPUConfig(device_id=2, vram=48),
         GPUConfig(device_id=3, vram=48)
     ]
-
+    
     # Task queue settings
     max_queue_size: int = 100
     task_timeout: int = 1800  # 30 minutes in seconds
     polling_interval: int = 1  # Check task status every second
-
-    # 每用户任务限制
-    max_tasks_per_user: int = 2  # 默认每用户同时最多2个任务
-
+    
     # GPU memory optimization
     default_save_vram: bool = False
-
+    
     # Mapping between resolution names and dimensions
     resolution_map: Dict[str, Dict[str, Union[int, str]]] = {
         "1280x720": {"width": 1280, "height": 720, "name": "720P Landscape"},
@@ -90,16 +86,7 @@ class Settings(BaseModel):
         "480x832": {"width": 480, "height": 832, "name": "480P Portrait"}
     }
 
-
 settings = Settings()
-
-
-# 从命令行参数更新配置
-def update_settings_from_args(args):
-    if hasattr(args, 'task_per_user') and args.task_per_user is not None:
-        settings.max_tasks_per_user = args.task_per_user
-        logging.getLogger("videoGenPlatform").info(f"Setting max_tasks_per_user to {settings.max_tasks_per_user}")
-
 
 # Ensure output directory exists
 os.makedirs(settings.output_dir, exist_ok=True)

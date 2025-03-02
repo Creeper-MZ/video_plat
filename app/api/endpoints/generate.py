@@ -144,6 +144,22 @@ async def text_to_video(
             detail=f"Failed to create T2V task: {str(e)}"
         )
 
+
+@router.get("/task/{task_id}/progress", response_model=dict)
+async def get_task_progress(task_id: str):
+    """
+    Get real-time progress of a task
+    """
+    task_info = task_queue.get_task_details(task_id)
+    if not task_info:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+    return {
+        "status": task_info["status"],
+        "progress": task_info["progress"],
+        "current_step": task_info.get("current_step", 0),
+        "total_steps": task_info.get("total_steps", 0)
+    }
 @router.post("/i2v", response_model=GenerationResponse)
 async def image_to_video(
     prompt: str = Form(...),

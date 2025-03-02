@@ -1174,6 +1174,29 @@ function cancelTask(taskId) {
         showToast('错误', `取消任务失败: ${error.message}`, 'error');
     });
 }
+function refreshTaskProgress(taskId) {
+    fetch(`/api/generate/task/${taskId}/progress`)
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('无法获取进度信息');
+            }
+            return response.json();
+        })
+        .then(data => {
+            // 只更新进度条
+            const progressBar = document.getElementById('taskProgressBar').querySelector('.progress-bar');
+            progressBar.style.width = `${data.progress}%`;
+            progressBar.textContent = `${data.progress}%`;
+        })
+        .catch(error => {
+            console.error('刷新进度出错:', error);
+        });
+}
+
+// 每200毫秒刷新一次进度
+function startProgressRefresh(taskId) {
+    return setInterval(() => refreshTaskProgress(taskId), 1000);
+}
     </script>
 </body>
 </html>

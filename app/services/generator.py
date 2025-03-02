@@ -354,14 +354,20 @@ class VideoGenerator:
             for line in iter(process.stderr.readline, ''):
                 stderr_lines.append(line)
 
-                if line.startswith("PROGRESS:"):
+                # 使用正则表达式来更健壮地匹配进度信息
+                if "PROGRESS:" in line:
                     try:
-                        _, current, total = line.strip().split(":")
-                        progress_handler.update(int(current), int(total))
+                        import re
+                        match = re.search(r'PROGRESS:(\d+):(\d+)', line)
+                        if match:
+                            current, total = int(match.group(1)), int(match.group(2))
+                            self.logger.info(f"进度解析成功: {current}/{total}")
+                            progress_handler.update(current, total)
+                        else:
+                            self.logger.warning(f"进度信息格式不匹配: {line.strip()}")
                     except Exception as e:
-                        self.logger.error(f"Error parsing progress: {str(e)}")
+                        self.logger.error(f"Error parsing progress: {str(e)}", exc_info=True)
                 else:
-                    # 记录所有stderr输出，对调试很有用
                     self.logger.info(f"Process stderr: {line.strip()}")
 
             # 收集stdout输出

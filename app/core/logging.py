@@ -70,13 +70,23 @@ class TaskLogger:
         self.logs.append({"level": "error", "message": message, "time": datetime.now().isoformat()})
         self.status = "error"
         return message
-    
-    def update_progress(self, step, total_steps):
-        """Update progress of the task"""
-        self.current_step = step
+
+    def update_progress(self, current_step: int, total_steps: int):
+        """Update task progress"""
+        if total_steps > 0:
+            self.progress = int((current_step / total_steps) * 100)
+        else:
+            self.progress = 0
+
+        self.current_step = current_step
         self.total_steps = total_steps
-        self.progress = int((step / total_steps) * 100) if total_steps > 0 else 0
-        self.logger.info(f"Progress: {self.progress}% (Step {step}/{total_steps})")
+
+        # 记录一条日志
+        self.info(f"Progress: {self.progress}% ({current_step}/{total_steps})")
+
+        # 确保任务信息保存到磁盘
+        self._save_task_info()
+
         return self.progress
     
     def update_status(self, status):

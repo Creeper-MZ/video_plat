@@ -175,14 +175,25 @@ class GPUManager:
                     "current_task": device.current_task
                 }
                 
-                # Add utilization info if available
-                if hasattr(device, 'vram_used') and hasattr(device, 'vram_total'):
-                    device_status.update({
-                        "vram_used": getattr(device, 'vram_used', 0),
-                        "vram_total": getattr(device, 'vram_total', 0),
-                        "vram_free": getattr(device, 'vram_total', 0) - getattr(device, 'vram_used', 0),
-                        "utilization": getattr(device, 'utilization', 0)
-                    })
+                # Safely get VRAM and utilization information
+                vram_used = getattr(device, 'vram_used', 0)
+                vram_total = getattr(device, 'vram_total', 0)
+                utilization = getattr(device, 'utilization', 0.0)
+                
+                # Ensure numeric values
+                vram_used = int(vram_used) if vram_used is not None else 0
+                vram_total = int(vram_total) if vram_total is not None else 0
+                utilization = float(utilization) if utilization is not None else 0.0
+                
+                # Calculate free VRAM
+                vram_free = max(0, vram_total - vram_used)
+                
+                device_status.update({
+                    "vram_used": vram_used,
+                    "vram_total": vram_total,
+                    "vram_free": vram_free,
+                    "utilization": utilization
+                })
                 
                 status.append(device_status)
             

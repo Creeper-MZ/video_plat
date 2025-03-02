@@ -9,12 +9,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 import os
+import sys
 
-from .api import api_router
-from .core.config import settings
-from .core.logging import setup_app_logger
-from .core.gpu_manager import gpu_manager
-from .services.task_queue import task_queue
+# 添加项目根目录到Python路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
+
+# 改为绝对导入
+from app.api import api_router
+from app.core.config import settings
+from app.core.logging import setup_app_logger
+from app.core.gpu_manager import gpu_manager
+from app.services.task_queue import task_queue
 
 def create_app(debug=False):
     # Setup logging
@@ -56,19 +63,6 @@ def create_app(debug=False):
             content={"detail": exc.detail}
         )
     
-    # Mount static files
-    static_dir = Path("app/static")
-    os.makedirs(static_dir, exist_ok=True)
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
-    
-    # Serve index.html for root path
-    @app.get("/")
-    async def read_index():
-        return FileResponse("app/static/index.html")
-    
-    # Include API routes
-    app.include_router(api_router, prefix="/api")
-    
     # Cleanup old files
     @app.on_event("startup")
     def cleanup_old_files():
@@ -96,6 +90,19 @@ def create_app(debug=False):
         except Exception as e:
             logger.error(f"Error during startup cleanup: {str(e)}")
     
+    # Mount static files
+    static_dir = Path("app/static")
+    os.makedirs(static_dir, exist_ok=True)
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    
+    # Serve index.html for root path
+    @app.get("/")
+    async def read_index():
+        return FileResponse("app/static/index.html")
+    
+    # Include API routes
+    app.include_router(api_router, prefix="/api")
+    
     # Shutdown event
     @app.on_event("shutdown")
     def shutdown_event():
@@ -116,15 +123,12 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     
-    # Create app
+    # Run server directly without factory function for easier command-line usage
     app = create_app(debug=args.debug)
     
-    # Run server
     uvicorn.run(
-        "app.main:create_app",
+        app,
         host=args.host,
         port=args.port,
-        reload=args.reload,
-        factory=True,
-        kwargs={"debug": args.debug}
+        reload=args.reload
     )

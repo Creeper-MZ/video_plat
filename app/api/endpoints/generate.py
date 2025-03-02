@@ -293,7 +293,21 @@ async def get_task_status(task_id: str, client_id: str = Depends(get_client_id))
 
     # Check if task belongs to the current client
     if task_info.get("client_id") and task_info.get("client_id") != client_id:
-        raise HTTPException(status_code=403, detail="You do not have permission to view this task")
+        # For non-owners, provide limited information with masked details
+        masked_task = {
+            "id": task_info["id"],
+            "type": task_info["type"],
+            "status": task_info["status"],
+            "progress": task_info["progress"],
+            "created_at": task_info["created_at"],
+            "started_at": task_info["started_at"],
+            "completed_at": task_info["completed_at"],
+            "gpu_id": task_info["gpu_id"],
+            "client_id": task_info["client_id"],
+            "params": {"prompt": "****"},  # Mask prompt
+            "logs": [{"level": "info", "message": "****", "time": datetime.now().isoformat()}]  # Mask logs
+        }
+        return masked_task
 
     return task_info
 
@@ -324,3 +338,90 @@ async def get_queue_status(client_id: str = Depends(get_client_id)):
     Get status of the task queue for the current client
     """
     return task_queue.get_client_tasks(client_id)
+
+
+@router.get("/all_tasks", response_model=dict)
+async def get_all_tasks(client_id: str = Depends(get_client_id)):
+    """
+    Get all tasks in the system (used for global task view)
+    Returns user's own tasks with full details and other users' tasks with masked content
+    """
+    # Get all tasks from queue
+    all_queue_data = task_queue.get_queue_status()
+    client_queue_data = task_queue.get_client_tasks(client_id)
+
+    # Create a combined view where:
+    # - User's own tasks have full details
+    # - Other users' tasks have minimal details (masking private info)
+
+    # Process queued tasks
+    all_queued = []
+    for task in all_queue_data["queue"]:
+        if task["client_id"] == client_id:
+            all_queued.append(task)  # Include full details for own tasks
+        else:
+            # Create a masked version for other users' tasks
+            masked_task = {
+                "id": task["id"],
+                "type": task["type"],
+                "status": task["status"],
+                "progress": task["progress"],
+                "created_at": task["created_at"],
+                "started_at": task["started_at"],
+                "completed_at": task["completed_at"],
+                "client_id": task["client_id"],
+                # Mask the prompt with a generic description
+                "params": {"prompt": "****"}
+            }
+            all_queued.append(masked_task)
+
+    # Process running tasks
+    all_running = []
+    for task in all_queue_data["running"]:
+        if task["client_id"] == client_id:
+            all_running.append(task)  # Include full details for own tasks
+        else:
+            # Create a masked version for other users' tasks
+            masked_task = {
+                "id": task["id"],
+                "type": task["type"],
+                "status": task["status"],
+                "progress": task["progress"],
+                "created_at": task["created_at"],
+                "started_at": task["started_at"],
+                "completed_at": task["completed_at"],
+                "client_id": task["client_id"],
+                # Mask the prompt with a generic description
+                "params": {"prompt": "****"}
+            }
+            all_running.append(masked_task)
+
+    # Process completed tasks
+    all_completed = []
+    for task in all_queue_data["recent_completed"]:
+        if task["client_id"] == client_id:
+            all_completed.append(task)  # Include full details for own tasks
+        else:
+            # Create a masked version for other users' tasks
+            masked_task = {
+                "id": task["id"],
+                "type": task["type"],
+                "status": task["status"],
+                "progress": task["progress"],
+                "created_at": task["created_at"],
+                "started_at": task["started_at"],
+                "completed_at": task["completed_at"],
+                "client_id": task["client_id"],
+                # Mask the prompt with a generic description
+                "params": {"prompt": "****"}
+            }
+            all_completed.append(masked_task)
+
+    return {
+        "queue_length": len(all_queued),
+        "running_tasks": len(all_running),
+        "completed_tasks": len(all_completed),
+        "queue": all_queued,
+        "running": all_running,
+        "recent_completed": all_completed,
+    }

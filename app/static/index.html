@@ -512,28 +512,29 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
 
 
+
 <script>
-// Global variables
+// Variables globales
 let currentTaskId = null;
 let taskRefreshInterval = null;
 let systemRefreshInterval = null;
-let clientId = null; // Add client ID variable
+let clientId = null; // Añadir variable de ID de cliente
 const SYSTEM_REFRESH_INTERVAL = 5000; // 5秒
 const TASK_REFRESH_INTERVAL = 2000;   // 2秒
 
-// Initialize client ID and add to requests
+// Inicializar ID de cliente y añadir a las solicitudes
 document.addEventListener('DOMContentLoaded', function() {
-    // Initialize tooltips
+    // Inicializar tooltips
     const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
     const tooltipList = [...tooltipTriggerList].map(tooltipTriggerEl => new bootstrap.Tooltip(tooltipTriggerEl));
 
-    // Generate a client ID if it doesn't exist
+    // Generar un ID de cliente si no existe
     clientId = localStorage.getItem('clientId');
     if (!clientId) {
         clientId = 'client_' + Math.random().toString(36).substring(2, 15);
         localStorage.setItem('clientId', clientId);
     }
-    console.log("Using client ID:", clientId);
+    console.log("Usando ID de cliente:", clientId);
 
     // 图片预览
     document.getElementById('i2vImage').addEventListener('change', function(e) {
@@ -643,6 +644,11 @@ function addClientIdHeader(options = {}) {
     }
     options.headers['X-Client-ID'] = clientId;
     return options;
+}
+
+// 验证任务是否属于当前用户
+function isTaskOwnedByCurrentUser(task) {
+    return task.client_id === clientId;
 }
 
 // 显示通知提示
@@ -813,7 +819,8 @@ function submitI2VForm() {
 function fetchSystemStatus() {
     console.log("开始获取系统状态...");
 
-    return fetch('/api/status/system', addClientIdHeader())
+    // 使用新的endpoint获取所有任务（带有隐私保护）
+    return fetch('/api/generate/all_tasks', addClientIdHeader())
         .then(response => {
             console.log("系统状态响应码:", response.status);
 
@@ -826,27 +833,31 @@ function fetchSystemStatus() {
 
             return response.json();
         })
-        .then(data => {
+        .then(async (queueData) => {
             console.log("收到系统状态数据");
 
             // 确保数据结构正确
-            if (!data || typeof data !== 'object') {
-                console.error("从服务器接收到空数据或格式错误", data);
+            if (!queueData || typeof queueData !== 'object') {
+                console.error("从服务器接收到空数据或格式错误", queueData);
                 throw new Error("无效的响应数据");
             }
 
+            // 获取GPU状态
+            const gpuResponse = await fetch('/api/status/gpu', addClientIdHeader());
+            const gpus = await gpuResponse.json();
+
             // 更新UI
             try {
-                updateGPUStatus(data.gpus || []);
-                updateQueueStatus(data.queue || {});
-                updateTaskLists(data.queue || {});
+                updateGPUStatus(gpus || []);
+                updateQueueStatus(queueData || {});
+                updateTaskLists(queueData || {});
                 console.log("系统状态UI更新成功");
             } catch (updateError) {
                 console.error("更新UI时出错:", updateError);
                 throw updateError;
             }
 
-            return data;
+            return { gpus, queue: queueData };
         })
         .catch(error => {
             console.error('获取系统状态错误:', error);
@@ -1001,13 +1012,19 @@ function getTaskListItemHtml(task) {
             statusBadge = `<span class="badge bg-secondary">${task.status}</span>`;
     }
 
+    // 检查是否属于当前用户，如果不是则隐藏内容
+    const isOwner = isTaskOwnedByCurrentUser(task);
+    const promptText = isOwner ?
+        (task.params && task.params.prompt ? task.params.prompt : '无提示词') :
+        '****'; // 非所有者看到的内容为****
+
     return `
     <a href="#" class="list-group-item list-group-item-action task-list-item" data-task-id="${task.id}">
         <div class="d-flex w-100 justify-content-between">
             <h6 class="mb-1">任务 ${task.id.substring(0, 8)}...</h6>
             ${statusBadge}
         </div>
-        <p class="mb-1 small text-truncate">${task.params && task.params.prompt ? task.params.prompt : '无提示词'}</p>
+        <p class="mb-1 small text-truncate">${promptText}</p>
         <div class="d-flex w-100 justify-content-between align-items-center">
             <small class="text-muted">${formatTimestamp(task.created_at)}</small>
             ${task.status === 'running' ? `<div class="small">${task.progress}%</div>` : ''}
@@ -1078,6 +1095,9 @@ function fetchTaskDetail(taskId) {
 
 // 更新任务详情
 function updateTaskDetail(task) {
+    // 检查是否属于当前用户
+    const isOwner = isTaskOwnedByCurrentUser(task);
+
     // 基本信息
     document.getElementById('detailTaskId').textContent = task.id;
     document.getElementById('detailTaskType').textContent = task.type.toUpperCase();
@@ -1117,49 +1137,64 @@ function updateTaskDetail(task) {
     progressBar.style.width = `${task.progress}%`;
     progressBar.textContent = `${task.progress}%`;
 
-    // 参数
-    document.getElementById('detailTaskParams').textContent = JSON.stringify(task.params, null, 2);
+    // 参数 - 非所有者看到的内容为****
+    document.getElementById('detailTaskParams').textContent = isOwner ?
+        JSON.stringify(task.params, null, 2) :
+        "****";
 
-    // 日志
+    // 日志 - 非所有者不显示详细日志
     const logsContainer = document.getElementById('detailTaskLogs');
-    if (task.logs && task.logs.length > 0) {
-        let logsHtml = '';
-        task.logs.forEach(log => {
-            const logClass = `log-${log.level}`;
-            const timestamp = new Date(log.time).toLocaleTimeString();
-            logsHtml += `<p class="log-entry ${logClass}">[${timestamp}] ${log.message}</p>`;
-        });
-        logsContainer.innerHTML = logsHtml;
+    if (isOwner) {
+        if (task.logs && task.logs.length > 0) {
+            let logsHtml = '';
+            task.logs.forEach(log => {
+                const logClass = `log-${log.level}`;
+                const timestamp = new Date(log.time).toLocaleTimeString();
+                logsHtml += `<p class="log-entry ${logClass}">[${timestamp}] ${log.message}</p>`;
+            });
+            logsContainer.innerHTML = logsHtml;
 
-        // 如果没有向上滚动，则滚动到日志底部
-        if (logsContainer.scrollTop + logsContainer.clientHeight >= logsContainer.scrollHeight - 50) {
-            logsContainer.scrollTop = logsContainer.scrollHeight;
+            // 如果没有向上滚动，则滚动到日志底部
+            if (logsContainer.scrollTop + logsContainer.clientHeight >= logsContainer.scrollHeight - 50) {
+                logsContainer.scrollTop = logsContainer.scrollHeight;
+            }
+        } else {
+            logsContainer.innerHTML = '<p class="text-center text-muted">没有可用日志</p>';
         }
     } else {
-        logsContainer.innerHTML = '<p class="text-center text-muted">没有可用日志</p>';
+        logsContainer.innerHTML = '<p class="text-center text-muted">****</p>';
     }
 
-    // 结果预览
+    // 结果预览 - 非所有者只能看到完成状态，不能直接访问内容
     const resultPreviewContainer = document.getElementById('resultPreviewContainer');
     const downloadBtn = document.getElementById('downloadResultBtn');
 
     if (task.status === 'completed' && task.result && task.result.file_url) {
-        resultPreviewContainer.style.display = 'block';
-        const videoResult = document.getElementById('videoResult');
-        videoResult.src = task.result.file_url;
+        if (isOwner) {
+            resultPreviewContainer.style.display = 'block';
+            const videoResult = document.getElementById('videoResult');
+            videoResult.src = task.result.file_url;
 
-        // 下载按钮
-        downloadBtn.style.display = 'inline-block';
-        downloadBtn.href = task.result.file_url;
-        downloadBtn.download = task.result.file_url.split('/').pop();
+            // 下载按钮
+            downloadBtn.style.display = 'inline-block';
+            downloadBtn.href = task.result.file_url;
+            downloadBtn.download = task.result.file_url.split('/').pop();
+        } else {
+            // 非所有者显示任务已完成但不显示内容
+            resultPreviewContainer.style.display = 'block';
+            const videoResult = document.getElementById('videoResult');
+            videoResult.style.display = 'none'; // 隐藏视频
+            resultPreviewContainer.innerHTML = '<p class="text-center">结果可用，但您无权查看</p>';
+            downloadBtn.style.display = 'none';
+        }
     } else {
         resultPreviewContainer.style.display = 'none';
         downloadBtn.style.display = 'none';
     }
 
-    // 取消按钮可见性
+    // 取消按钮可见性 - 只有所有者可以取消任务
     const cancelBtn = document.getElementById('cancelTaskBtn');
-    if (task.status === 'queued' || task.status === 'running') {
+    if (isOwner && (task.status === 'queued' || task.status === 'running')) {
         cancelBtn.style.display = 'inline-block';
     } else {
         cancelBtn.style.display = 'none';

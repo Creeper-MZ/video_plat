@@ -749,26 +749,38 @@
         }
         
         function fetchSystemStatus() {
-            // Fetch GPU and queue status
-            return fetch('/api/status/system')
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error('Failed to fetch system status');
-                    }
-                    return response.json();
-                })
-                .then(data => {
-                    updateGPUStatus(data.gpus);
-                    updateQueueStatus(data.queue);
-                    updateTaskLists(data.queue);
-                    return data; // Return data for promise chaining
-                })
-                .catch(error => {
-                    console.error('Error fetching system status:', error);
-                    showToast('Error', 'Failed to update system status. Retrying...', 'error');
-                    throw error; // Re-throw for promise chaining
+    // Fetch GPU and queue status
+    return fetch('/api/status/system')
+        .then(response => {
+            if (!response.ok) {
+                // Log the full response for debugging
+                return response.text().then(errorText => {
+                    console.error('Detailed error:', errorText);
+                    throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
                 });
-        }
+            }
+            return response.json();
+        })
+        .then(data => {
+            updateGPUStatus(data.gpus || []);
+            updateQueueStatus(data.queue || {});
+            updateTaskLists(data.queue || {});
+            return data;
+        })
+        .catch(error => {
+            console.error('Comprehensive error fetching system status:', error);
+            // Add more detailed error logging
+            const errorMessage = error.message || 'Unknown error';
+            showToast('Error', `Failed to update system status: ${errorMessage}`, 'error');
+            
+            // Provide a more informative error message
+            document.getElementById('loadingModalText').textContent = 'Connection Error';
+            document.getElementById('loadingModalSubtext').textContent = 
+                `Could not connect to the server. Error: ${errorMessage}. Please check the server status.`;
+            
+            throw error;
+        });
+}
         
         function updateGPUStatus(gpus) {
             const gpuStatusEl = document.getElementById('gpuStatus');

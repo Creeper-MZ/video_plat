@@ -426,25 +426,20 @@
 
                 <!-- Tasks List -->
                 <div class="card">
-    <div class="card-header d-flex justify-content-between align-items-center">
-        <ul class="nav nav-tabs card-header-tabs" id="tasksTabs" role="tablist">
-            <li class="nav-item" role="presentation">
-                <button class="nav-link active" id="queue-tab" data-bs-toggle="tab" data-bs-target="#queuedTasks" type="button" role="tab">排队</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="running-tab" data-bs-toggle="tab" data-bs-target="#runningTasks" type="button" role="tab">运行中</button>
-            </li>
-            <li class="nav-item" role="presentation">
-                <button class="nav-link" id="completed-tab" data-bs-toggle="tab" data-bs-target="#completedTasks" type="button" role="tab">已完成</button>
-            </li>
-        </ul>
-
-        <div class="form-check form-switch">
-            <input class="form-check-input" type="checkbox" id="showAllTasksSwitch">
-            <label class="form-check-label" for="showAllTasksSwitch">显示所有用户任务</label>
-        </div>
-    </div>
-    <div class="tab-content" id="tasksTabsContent">
+                    <div class="card-header">
+                        <ul class="nav nav-tabs card-header-tabs" id="tasksTabs" role="tablist">
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link active" id="queue-tab" data-bs-toggle="tab" data-bs-target="#queuedTasks" type="button" role="tab">Queued</button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="running-tab" data-bs-toggle="tab" data-bs-target="#runningTasks" type="button" role="tab">Running</button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="completed-tab" data-bs-toggle="tab" data-bs-target="#completedTasks" type="button" role="tab">Completed</button>
+                            </li>
+                        </ul>
+                    </div>
+                    <div class="tab-content" id="tasksTabsContent">
                         <div class="tab-pane fade show active" id="queuedTasks" role="tabpanel">
                             <div class="list-group list-group-flush" id="queuedTasksList">
                                 <div class="list-group-item text-center py-3">No queued tasks</div>

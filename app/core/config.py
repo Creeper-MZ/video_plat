@@ -2,7 +2,7 @@
 
 import os
 from typing import Dict, List, Optional, Union
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class ModelConfig(BaseModel):
     model_path: str
@@ -14,6 +14,10 @@ class GPUConfig(BaseModel):
     vram: int
     available: bool = True
     current_task: Optional[str] = None
+    # 添加下面这些属性，让GPU管理器可以更新它们
+    vram_used: Optional[int] = None
+    vram_total: Optional[int] = None
+    utilization: Optional[float] = None
 
 class Settings(BaseModel):
     debug: bool = False
@@ -81,7 +85,7 @@ class Settings(BaseModel):
         "832x480": {"width": 832, "height": 480, "name": "480P Landscape"},
         "480x832": {"width": 480, "height": 832, "name": "480P Portrait"}
     }
-    
+
 settings = Settings()
 
 # Ensure output directory exists

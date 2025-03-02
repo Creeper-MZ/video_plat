@@ -14,9 +14,9 @@ import sys
 # 添加项目根目录到Python路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
-sys.path.append(parent_dir)
+sys.path.insert(0, parent_dir)
 
-# 改为绝对导入
+# 使用绝对导入
 from app.api import api_router
 from app.core.config import settings
 from app.core.logging import setup_app_logger
@@ -27,6 +27,11 @@ def create_app(debug=False):
     # Setup logging
     logger = setup_app_logger(debug=debug)
     logger.info("Initializing Wan2.1 Video Generation Platform")
+    
+    # 确保必要的目录存在
+    os.makedirs("app/static/videos", exist_ok=True)
+    os.makedirs("logs", exist_ok=True)
+    os.makedirs("tasks", exist_ok=True)
     
     # Create FastAPI app
     app = FastAPI(
@@ -81,11 +86,6 @@ def create_app(debug=False):
                         except Exception as e:
                             logger.error(f"Failed to delete old file {old_file}: {str(e)}")
             
-            # Create necessary directories
-            os.makedirs(settings.output_dir, exist_ok=True)
-            os.makedirs("logs", exist_ok=True)
-            os.makedirs("tasks", exist_ok=True)
-            
             logger.info("Startup cleanup completed")
         except Exception as e:
             logger.error(f"Error during startup cleanup: {str(e)}")
@@ -123,7 +123,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     
-    # Run server directly without factory function for easier command-line usage
+    # 直接运行app实例，不使用工厂函数
     app = create_app(debug=args.debug)
     
     uvicorn.run(

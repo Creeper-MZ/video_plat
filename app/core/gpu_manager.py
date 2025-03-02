@@ -18,12 +18,6 @@ class GPUManager:
     
     def __init__(self):
         self.devices = settings.gpu_devices
-        # Add additional properties to each device
-        for device in self.devices:
-            device.vram_used = 0
-            device.vram_total = device.vram
-            device.utilization = 0
-            
         self.lock = threading.Lock()
         self._monitoring_thread = None
         self._stop_monitoring = threading.Event()
@@ -54,12 +48,12 @@ class GPUManager:
                 with self.lock:
                     for i, device in enumerate(self.devices):
                         if i < len(gpu_stats):
-                            # Update device stats
-                            device.vram_used = gpu_stats[i]["memory_used"]
-                            device.vram_total = gpu_stats[i]["memory_total"]
-                            device.utilization = gpu_stats[i]["utilization"]
+                            # Update device stats using setattr to avoid validation errors
+                            setattr(device, "vram_used", gpu_stats[i]["memory_used"])
+                            setattr(device, "vram_total", gpu_stats[i]["memory_total"])
+                            setattr(device, "utilization", gpu_stats[i]["utilization"])
                 
-                logger.debug(f"Updated GPU stats: {[{d.device_id: {'used': d.vram_used, 'total': d.vram_total, 'util': d.utilization}} for d in self.devices]}")
+                logger.debug(f"Updated GPU stats: {[{d.device_id: {'used': getattr(d, 'vram_used', 0), 'total': getattr(d, 'vram_total', 0), 'util': getattr(d, 'utilization', 0)}} for d in self.devices]}")
             except Exception as e:
                 logger.error(f"Error monitoring GPUs: {str(e)}")
             
@@ -101,7 +95,7 @@ class GPUManager:
             logger.error(f"Failed to run nvidia-smi: {str(e)}")
             # If nvidia-smi fails but we know GPUs exist, return dummy stats
             if len(self.devices) > 0:
-                return [{"index": i, "memory_used": 0, "memory_total": d.vram, "utilization": 0} 
+                return [{"index": i, "memory_used": 0, "memory_total": getattr(d, "vram", 0), "utilization": 0} 
                         for i, d in enumerate(self.devices)]
             return []
         except Exception as e:
@@ -122,7 +116,7 @@ class GPUManager:
         with self.lock:
             # Find available GPU with enough free memory
             for device in self.devices:
-                if device.available and device.current_task is None:
+                if device.available and not device.current_task:
                     # Check if we need to verify memory first
                     if hasattr(device, 'vram_used') and hasattr(device, 'vram_total'):
                         free_memory = device.vram_total - device.vram_used
@@ -184,9 +178,9 @@ class GPUManager:
                 # Add utilization info if available
                 if hasattr(device, 'vram_used') and hasattr(device, 'vram_total'):
                     device_status.update({
-                        "vram_used": device.vram_used,
-                        "vram_total": device.vram_total,
-                        "vram_free": device.vram_total - device.vram_used,
+                        "vram_used": getattr(device, 'vram_used', 0),
+                        "vram_total": getattr(device, 'vram_total', 0),
+                        "vram_free": getattr(device, 'vram_total', 0) - getattr(device, 'vram_used', 0),
                         "utilization": getattr(device, 'utilization', 0)
                     })
                 

@@ -513,640 +513,667 @@
     <script>
         // Global variables
         let currentTaskId = null;
-        let taskRefreshInterval = null;
-        let systemRefreshInterval = null;
-        const SYSTEM_REFRESH_INTERVAL = 5000; // 5 seconds
-        const TASK_REFRESH_INTERVAL = 2000;   // 2 seconds
-        
-        // Initialize tooltips
-        const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
-        const tooltipList = [...tooltipTriggerList].map(tooltipTriggerEl => new bootstrap.Tooltip(tooltipTriggerEl));
-        
-        // Image preview
-        document.getElementById('i2vImage').addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            if (file) {
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    document.getElementById('imagePreview').src = e.target.result;
-                    document.getElementById('imagePreviewContainer').style.display = 'block';
-                }
-                reader.readAsDataURL(file);
+let taskRefreshInterval = null;
+let systemRefreshInterval = null;
+const SYSTEM_REFRESH_INTERVAL = 5000; // 5秒
+const TASK_REFRESH_INTERVAL = 2000;   // 2秒
+
+// 初始化tooltips
+document.addEventListener('DOMContentLoaded', function() {
+    const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
+    const tooltipList = [...tooltipTriggerList].map(tooltipTriggerEl => new bootstrap.Tooltip(tooltipTriggerEl));
+
+    // 图片预览
+    document.getElementById('i2vImage').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                document.getElementById('imagePreview').src = e.target.result;
+                document.getElementById('imagePreviewContainer').style.display = 'block';
             }
-        });
-        
-        // Form submission handlers
-        document.getElementById('t2vForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            submitT2VForm();
-        });
-        
-        document.getElementById('i2vForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            submitI2VForm();
-        });
-        
-        // Refresh system status button
-        document.getElementById('refreshSystemStatus').addEventListener('click', function(e) {
-            e.preventDefault();
-            fetchSystemStatus();
-        });
-        
-        // Close task detail button
-        document.getElementById('closeTaskDetail').addEventListener('click', function() {
-            document.getElementById('taskDetailPanel').style.display = 'none';
-            if (taskRefreshInterval) {
-                clearInterval(taskRefreshInterval);
-                taskRefreshInterval = null;
-            }
-            currentTaskId = null;
-        });
-        
-        // Cancel task button
-        document.getElementById('cancelTaskBtn').addEventListener('click', function() {
-            if (currentTaskId) {
-                cancelTask(currentTaskId);
-            }
-        });
-        
-        // Initialize page
-        document.addEventListener('DOMContentLoaded', function() {
-    // Show loading modal
+            reader.readAsDataURL(file);
+        }
+    });
+
+    // 表单提交处理
+    document.getElementById('t2vForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        submitT2VForm();
+    });
+
+    document.getElementById('i2vForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        submitI2VForm();
+    });
+
+    // 刷新系统状态按钮
+    document.getElementById('refreshSystemStatus').addEventListener('click', function(e) {
+        e.preventDefault();
+        fetchSystemStatus();
+    });
+
+    // 关闭任务详情按钮
+    document.getElementById('closeTaskDetail').addEventListener('click', function() {
+        document.getElementById('taskDetailPanel').style.display = 'none';
+        if (taskRefreshInterval) {
+            clearInterval(taskRefreshInterval);
+            taskRefreshInterval = null;
+        }
+        currentTaskId = null;
+    });
+
+    // 取消任务按钮
+    document.getElementById('cancelTaskBtn').addEventListener('click', function() {
+        if (currentTaskId) {
+            cancelTask(currentTaskId);
+        }
+    });
+
+    // 显示加载模态框
     const loadingModal = new bootstrap.Modal(document.getElementById('loadingModal'));
     loadingModal.show();
 
-    // Fetch initial system status
-    fetchSystemStatus()
+    console.log("页面加载，开始初次获取系统状态");
+
+    // 先简单获取一下系统状态检查API是否正常工作
+    fetch('/api/status/system')
+        .then(response => {
+            console.log("Initial API check - response status:", response.status);
+            if (!response.ok) {
+                throw new Error(`HTTP error: ${response.status}`);
+            }
+            return response.json();
+        })
+        .then(data => {
+            console.log("API正常工作，收到数据:", data);
+
+            // API正常工作，现在使用完整的fetchSystemStatus方法
+            return fetchSystemStatus();
+        })
         .then(() => {
-            // Hide loading modal after data is loaded
-            console.log("Initial status loaded successfully, hiding modal");
+            console.log("初始状态加载成功，隐藏加载框");
+            // 确保加载框被隐藏
             loadingModal.hide();
+
+            // 设置定时刷新
+            if (systemRefreshInterval) {
+                clearInterval(systemRefreshInterval);
+            }
+            systemRefreshInterval = setInterval(fetchSystemStatus, SYSTEM_REFRESH_INTERVAL);
         })
         .catch(error => {
-            console.error("Error during initial status load:", error);
+            console.error("连接服务器出错:", error);
 
-            // 即使出错也修改对话框内容并添加重试按钮
-            document.getElementById('loadingModalText').textContent = 'Connection Error';
+            // 修改模态框显示错误信息
+            document.getElementById('loadingModalText').textContent = '连接错误';
             document.getElementById('loadingModalSubtext').textContent =
-                'Could not connect to the server. Please check your connection and refresh the page.';
+                `无法连接到服务器。错误: ${error.message}. 请检查服务器状态。`;
 
-            // Add a retry button
+            // 添加重试按钮
             const modalBody = document.querySelector('#loadingModal .modal-body');
-
-            // 检查是否已经添加了按钮，避免重复添加
-            if (!modalBody.querySelector('button')) {
+            if (!modalBody.querySelector('.retry-btn')) {
                 const retryBtn = document.createElement('button');
-                retryBtn.className = 'btn btn-primary mt-3';
-                retryBtn.textContent = 'Retry Connection';
+                retryBtn.className = 'btn btn-primary mt-3 retry-btn';
+                retryBtn.textContent = '重试连接';
                 retryBtn.onclick = function() {
                     location.reload();
                 };
                 modalBody.appendChild(retryBtn);
             }
-
-            // 不要在这里关闭对话框，让用户选择重试
-        })
-        .finally(() => {
-            // Set up periodic refresh for system status
-            if (systemRefreshInterval) {
-                clearInterval(systemRefreshInterval);
-            }
-            systemRefreshInterval = setInterval(fetchSystemStatus, SYSTEM_REFRESH_INTERVAL);
         });
 });
-        
-        // Helper functions
-        function showToast(title, message, type = 'success') {
-            const toast = document.getElementById('toast');
-            const toastInstance = new bootstrap.Toast(toast);
-            
-            document.getElementById('toastTitle').textContent = title;
-            document.getElementById('toastMessage').textContent = message;
-            document.getElementById('toastTime').textContent = new Date().toLocaleTimeString();
-            
-            // Set toast color based on type
-            toast.classList.remove('bg-success', 'bg-danger', 'bg-warning', 'text-white');
-            if (type === 'success') {
-                toast.classList.add('bg-success', 'text-white');
-            } else if (type === 'error') {
-                toast.classList.add('bg-danger', 'text-white');
-            } else if (type === 'warning') {
-                toast.classList.add('bg-warning');
-            }
-            
-            toastInstance.show();
+
+// 显示通知提示
+function showToast(title, message, type = 'success') {
+    const toast = document.getElementById('toast');
+    const toastInstance = new bootstrap.Toast(toast);
+
+    document.getElementById('toastTitle').textContent = title;
+    document.getElementById('toastMessage').textContent = message;
+    document.getElementById('toastTime').textContent = new Date().toLocaleTimeString();
+
+    // 设置提示类型
+    toast.classList.remove('bg-success', 'bg-danger', 'bg-warning', 'text-white');
+    if (type === 'success') {
+        toast.classList.add('bg-success', 'text-white');
+    } else if (type === 'error') {
+        toast.classList.add('bg-danger', 'text-white');
+    } else if (type === 'warning') {
+        toast.classList.add('bg-warning');
+    }
+
+    toastInstance.show();
+}
+
+// 格式化时间戳
+function formatTimestamp(timestamp) {
+    if (!timestamp) return 'N/A';
+    return new Date(timestamp).toLocaleString();
+}
+
+// 提交文本到视频表单
+function submitT2VForm() {
+    const formData = {
+        basic: {
+            prompt: document.getElementById('t2vPrompt').value,
+            negative_prompt: document.getElementById('t2vNegativePrompt').value || undefined,
+            resolution: document.getElementById('t2vResolution').value,
+            num_frames: parseInt(document.getElementById('t2vNumFrames').value),
+            fps: parseInt(document.getElementById('t2vFps').value),
+            steps: parseInt(document.getElementById('t2vSteps').value),
+            shift: parseFloat(document.getElementById('t2vShift').value) || undefined,
+            guide_scale: parseFloat(document.getElementById('t2vGuideScale').value),
+            seed: parseInt(document.getElementById('t2vSeed').value),
+            use_fp8: document.getElementById('t2vUseFp8').checked
+        },
+        advanced: {
+            save_vram: document.getElementById('t2vSaveVRAM').checked,
+            debug: document.getElementById('t2vDebug').checked
         }
-        
-        function formatTimestamp(timestamp) {
-            if (!timestamp) return 'N/A';
-            return new Date(timestamp).toLocaleString();
-        }
-        
-        function submitT2VForm() {
-            const formData = {
-                basic: {
-                    prompt: document.getElementById('t2vPrompt').value,
-                    negative_prompt: document.getElementById('t2vNegativePrompt').value || undefined,
-                    resolution: document.getElementById('t2vResolution').value,
-                    num_frames: parseInt(document.getElementById('t2vNumFrames').value),
-                    fps: parseInt(document.getElementById('t2vFps').value),
-                    steps: parseInt(document.getElementById('t2vSteps').value),
-                    shift: parseFloat(document.getElementById('t2vShift').value) || undefined,
-                    guide_scale: parseFloat(document.getElementById('t2vGuideScale').value),
-                    seed: parseInt(document.getElementById('t2vSeed').value),
-                    use_fp8: document.getElementById('t2vUseFp8').checked
-                },
-                advanced: {
-                    save_vram: document.getElementById('t2vSaveVRAM').checked,
-                    debug: document.getElementById('t2vDebug').checked
-                }
-            };
-            
-            // Disable submit button
-            const submitBtn = document.getElementById('t2vSubmit');
-            const originalText = submitBtn.innerHTML;
-            submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Submitting...';
-            submitBtn.disabled = true;
-            
-            fetch('/api/generate/t2v', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify(formData)
-            })
-            .then(response => {
-                if (!response.ok) {
-                    return response.json().then(data => {
-                        throw new Error(data.detail || 'Server error');
-                    });
-                }
-                return response.json();
-            })
-            .then(data => {
-                showToast('Success', `Task ${data.task_id} added to queue`);
-                // Open task detail panel for the new task
-                openTaskDetail(data.task_id);
-                
-                // Force refresh system status
-                fetchSystemStatus();
-            })
-            .catch(error => {
-                showToast('Error', `Failed to submit task: ${error.message}`, 'error');
-            })
-            .finally(() => {
-                // Re-enable submit button
-                submitBtn.innerHTML = originalText;
-                submitBtn.disabled = false;
+    };
+
+    // 禁用提交按钮
+    const submitBtn = document.getElementById('t2vSubmit');
+    const originalText = submitBtn.innerHTML;
+    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 提交中...';
+    submitBtn.disabled = true;
+
+    fetch('/api/generate/t2v', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(formData)
+    })
+    .then(response => {
+        if (!response.ok) {
+            return response.json().then(data => {
+                throw new Error(data.detail || '服务器错误');
             });
         }
-        
-        function submitI2VForm() {
-            const formData = new FormData();
-            
-            // Get file
-            const imageFile = document.getElementById('i2vImage').files[0];
-            if (!imageFile) {
-                showToast('Error', 'Please select an image file', 'error');
-                return;
-            }
-            
-            // Add form fields
-            formData.append('prompt', document.getElementById('i2vPrompt').value);
-            formData.append('negative_prompt', document.getElementById('i2vNegativePrompt').value || '');
-            formData.append('resolution', document.getElementById('i2vResolution').value);
-            formData.append('num_frames', document.getElementById('i2vNumFrames').value);
-            formData.append('fps', document.getElementById('i2vFps').value);
-            formData.append('steps', document.getElementById('i2vSteps').value);
-            formData.append('shift', document.getElementById('i2vShift').value || '');
-            formData.append('guide_scale', document.getElementById('i2vGuideScale').value);
-            formData.append('seed', document.getElementById('i2vSeed').value);
-            formData.append('use_fp8', document.getElementById('i2vUseFp8').checked);
-            formData.append('save_vram', document.getElementById('i2vSaveVRAM').checked);
-            formData.append('debug', document.getElementById('i2vDebug').checked);
-            formData.append('image', imageFile);
-            
-            // Disable submit button
-            const submitBtn = document.getElementById('i2vSubmit');
-            const originalText = submitBtn.innerHTML;
-            submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Submitting...';
-            submitBtn.disabled = true;
-            
-            fetch('/api/generate/i2v', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => {
-                if (!response.ok) {
-                    return response.json().then(data => {
-                        throw new Error(data.detail || 'Server error');
-                    });
-                }
-                return response.json();
-            })
-            .then(data => {
-                showToast('Success', `Task ${data.task_id} added to queue`);
-                // Open task detail panel for the new task
-                openTaskDetail(data.task_id);
-                
-                // Force refresh system status
-                fetchSystemStatus();
-            })
-            .catch(error => {
-                showToast('Error', `Failed to submit task: ${error.message}`, 'error');
-            })
-            .finally(() => {
-                // Re-enable submit button
-                submitBtn.innerHTML = originalText;
-                submitBtn.disabled = false;
+        return response.json();
+    })
+    .then(data => {
+        showToast('成功', `任务 ${data.task_id} 已添加到队列`);
+        // 打开任务详情面板
+        openTaskDetail(data.task_id);
+
+        // 强制刷新系统状态
+        fetchSystemStatus();
+    })
+    .catch(error => {
+        showToast('错误', `提交任务失败: ${error.message}`, 'error');
+    })
+    .finally(() => {
+        // 重新启用提交按钮
+        submitBtn.innerHTML = originalText;
+        submitBtn.disabled = false;
+    });
+}
+
+// 提交图像到视频表单
+function submitI2VForm() {
+    const formData = new FormData();
+
+    // 获取文件
+    const imageFile = document.getElementById('i2vImage').files[0];
+    if (!imageFile) {
+        showToast('错误', '请选择图像文件', 'error');
+        return;
+    }
+
+    // 添加表单字段
+    formData.append('prompt', document.getElementById('i2vPrompt').value);
+    formData.append('negative_prompt', document.getElementById('i2vNegativePrompt').value || '');
+    formData.append('resolution', document.getElementById('i2vResolution').value);
+    formData.append('num_frames', document.getElementById('i2vNumFrames').value);
+    formData.append('fps', document.getElementById('i2vFps').value);
+    formData.append('steps', document.getElementById('i2vSteps').value);
+    formData.append('shift', document.getElementById('i2vShift').value || '');
+    formData.append('guide_scale', document.getElementById('i2vGuideScale').value);
+    formData.append('seed', document.getElementById('i2vSeed').value);
+    formData.append('use_fp8', document.getElementById('i2vUseFp8').checked);
+    formData.append('save_vram', document.getElementById('i2vSaveVRAM').checked);
+    formData.append('debug', document.getElementById('i2vDebug').checked);
+    formData.append('image', imageFile);
+
+    // 禁用提交按钮
+    const submitBtn = document.getElementById('i2vSubmit');
+    const originalText = submitBtn.innerHTML;
+    submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 提交中...';
+    submitBtn.disabled = true;
+
+    fetch('/api/generate/i2v', {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => {
+        if (!response.ok) {
+            return response.json().then(data => {
+                throw new Error(data.detail || '服务器错误');
             });
         }
-        
+        return response.json();
+    })
+    .then(data => {
+        showToast('成功', `任务 ${data.task_id} 已添加到队列`);
+        // 打开任务详情面板
+        openTaskDetail(data.task_id);
+
+        // 强制刷新系统状态
+        fetchSystemStatus();
+    })
+    .catch(error => {
+        showToast('错误', `提交任务失败: ${error.message}`, 'error');
+    })
+    .finally(() => {
+        // 重新启用提交按钮
+        submitBtn.innerHTML = originalText;
+        submitBtn.disabled = false;
+    });
+}
+
+// 获取系统状态
 function fetchSystemStatus() {
-    // Fetch GPU and queue status
-    console.log("Fetching system status...");
+    console.log("开始获取系统状态...");
 
     return fetch('/api/status/system')
         .then(response => {
-            console.log("Response status:", response.status);
+            console.log("系统状态响应码:", response.status);
 
             if (!response.ok) {
-                // 记录详细错误信息
                 return response.text().then(errorText => {
-                    console.error('Server error response:', errorText);
-                    throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
+                    console.error('服务器错误:', errorText);
+                    throw new Error(`HTTP错误! 状态码: ${response.status}, 消息: ${errorText}`);
                 });
             }
 
-            return response.json().then(data => {
-                console.log("Received system status data:", data);
-                return data;
-            });
+            return response.json();
         })
         .then(data => {
-            // 验证数据结构
-            if (!data) {
-                console.error("Received empty data from server");
-                throw new Error("Empty response data");
+            console.log("收到系统状态数据");
+
+            // 确保数据结构正确
+            if (!data || typeof data !== 'object') {
+                console.error("从服务器接收到空数据或格式错误", data);
+                throw new Error("无效的响应数据");
             }
 
-            updateGPUStatus(data.gpus || []);
-            updateQueueStatus(data.queue || {});
-            updateTaskLists(data.queue || {});
+            // 更新UI
+            try {
+                updateGPUStatus(data.gpus || []);
+                updateQueueStatus(data.queue || {});
+                updateTaskLists(data.queue || {});
+                console.log("系统状态UI更新成功");
+            } catch (updateError) {
+                console.error("更新UI时出错:", updateError);
+                throw updateError;
+            }
 
-            console.log("System status updated successfully");
             return data;
         })
         .catch(error => {
-            console.error('Error fetching system status:', error);
-            const errorMessage = error.message || 'Unknown error';
-            showToast('Error', `Failed to update system status: ${errorMessage}`, 'error');
-
-            // 这里不要重复显示 loadingModal，因为它可能已经显示了
-            if (document.getElementById('loadingModal')) {
-                document.getElementById('loadingModalText').textContent = 'Connection Error';
-                document.getElementById('loadingModalSubtext').textContent =
-                    `Could not connect to the server. Error: ${errorMessage}. Please check the server status.`;
-            }
-            
+            console.error('获取系统状态错误:', error);
+            showToast('错误', `更新系统状态失败: ${error.message}`, 'error');
             throw error;
         });
 }
-        
-        function updateGPUStatus(gpus) {
-            const gpuStatusEl = document.getElementById('gpuStatus');
-            if (!gpus || gpus.length === 0) {
-                gpuStatusEl.innerHTML = '<p class="text-center">No GPU information available</p>';
-                return;
-            }
-            
-            let html = '';
-            gpus.forEach(gpu => {
-                const isInUse = !gpu.available;
-                const usedClass = isInUse ? 'in-use' : '';
-                const usagePercent = gpu.vram_total ? Math.floor((gpu.vram_used / gpu.vram_total) * 100) : 0;
-                
-                html += `
-                <div class="gpu-card card p-2 mb-2 ${usedClass}">
-                    <div class="d-flex justify-content-between">
-                        <div>
-                            <strong>GPU ${gpu.device_id}</strong>
-                            ${isInUse ? `<span class="badge bg-danger ms-2">In Use</span>` : '<span class="badge bg-success ms-2">Available</span>'}
-                        </div>
-                        <div class="text-end">
-                            <small>${isInUse ? `Task: ${gpu.current_task}` : 'Idle'}</small>
-                        </div>
-                    </div>
-                    ${gpu.vram_used !== undefined ? `
-                    <div class="mt-2">
-                        <div class="d-flex justify-content-between small text-muted">
-                            <span>VRAM Usage: ${gpu.vram_used}MB / ${gpu.vram_total}MB</span>
-                            <span>${usagePercent}%</span>
-                        </div>
-                        <div class="progress mt-1" style="height: 5px;">
-                            <div class="progress-bar" role="progressbar" style="width: ${usagePercent}%"></div>
-                        </div>
-                    </div>
-                    ` : ''}
-                    ${gpu.utilization !== undefined ? `
-                    <div class="small text-muted mt-1">
-                        Utilization: ${gpu.utilization.toFixed(1)}%
-                    </div>
-                    ` : ''}
+
+// 更新GPU状态
+function updateGPUStatus(gpus) {
+    const gpuStatusEl = document.getElementById('gpuStatus');
+    if (!gpus || gpus.length === 0) {
+        gpuStatusEl.innerHTML = '<p class="text-center">没有GPU信息可用</p>';
+        return;
+    }
+
+    let html = '';
+    gpus.forEach(gpu => {
+        const isInUse = !gpu.available;
+        const usedClass = isInUse ? 'in-use' : '';
+        const usagePercent = gpu.vram_total ? Math.floor((gpu.vram_used / gpu.vram_total) * 100) : 0;
+
+        html += `
+        <div class="gpu-card card p-2 mb-2 ${usedClass}">
+            <div class="d-flex justify-content-between">
+                <div>
+                    <strong>GPU ${gpu.device_id}</strong>
+                    ${isInUse ? `<span class="badge bg-danger ms-2">使用中</span>` : '<span class="badge bg-success ms-2">空闲</span>'}
                 </div>
-                `;
-            });
-            
-            gpuStatusEl.innerHTML = html;
-        }
-        
-        function updateQueueStatus(queueData) {
-            const queueStatusEl = document.getElementById('queueStatus');
-            if (!queueData) {
-                queueStatusEl.innerHTML = '<p class="text-center">No queue information available</p>';
-                return;
-            }
-            
-            const html = `
-            <ul class="list-group">
-                <li class="list-group-item d-flex justify-content-between align-items-center">
-                    Queued Tasks
-                    <span class="badge bg-primary rounded-pill">${queueData.queue_length}</span>
-                </li>
-                <li class="list-group-item d-flex justify-content-between align-items-center">
-                    Running Tasks
-                    <span class="badge bg-success rounded-pill">${queueData.running_tasks}</span>
-                </li>
-                <li class="list-group-item d-flex justify-content-between align-items-center">
-                    Completed Tasks
-                    <span class="badge bg-secondary rounded-pill">${queueData.completed_tasks}</span>
-                </li>
-            </ul>
-            `;
-            
-            queueStatusEl.innerHTML = html;
-        }
-        
-        function updateTaskLists(queueData) {
-            // Update queued tasks
-            const queuedListEl = document.getElementById('queuedTasksList');
-            if (queueData.queue.length === 0) {
-                queuedListEl.innerHTML = '<div class="list-group-item text-center py-3">No queued tasks</div>';
-            } else {
-                let html = '';
-                queueData.queue.forEach(task => {
-                    html += getTaskListItemHtml(task);
-                });
-                queuedListEl.innerHTML = html;
-            }
-            
-            // Update running tasks
-            const runningListEl = document.getElementById('runningTasksList');
-            if (queueData.running.length === 0) {
-                runningListEl.innerHTML = '<div class="list-group-item text-center py-3">No running tasks</div>';
-            } else {
-                let html = '';
-                queueData.running.forEach(task => {
-                    html += getTaskListItemHtml(task);
-                });
-                runningListEl.innerHTML = html;
-            }
-            
-            // Update completed tasks
-            const completedListEl = document.getElementById('completedTasksList');
-            if (queueData.recent_completed.length === 0) {
-                completedListEl.innerHTML = '<div class="list-group-item text-center py-3">No completed tasks</div>';
-            } else {
-                let html = '';
-                queueData.recent_completed.forEach(task => {
-                    html += getTaskListItemHtml(task);
-                });
-                completedListEl.innerHTML = html;
-            }
-            
-            // Add event listeners to task items
-            document.querySelectorAll('.task-list-item').forEach(item => {
-                item.addEventListener('click', function() {
-                    const taskId = this.getAttribute('data-task-id');
-                    openTaskDetail(taskId);
-                });
-            });
-        }
-        
-        function getTaskListItemHtml(task) {
-            let statusBadge = '';
-            switch (task.status) {
-                case 'queued':
-                    statusBadge = '<span class="badge bg-secondary">Queued</span>';
-                    break;
-                case 'running':
-                    statusBadge = '<span class="badge bg-primary">Running</span>';
-                    break;
-                case 'completed':
-                    statusBadge = '<span class="badge bg-success">Completed</span>';
-                    break;
-                case 'failed':
-                    statusBadge = '<span class="badge bg-danger">Failed</span>';
-                    break;
-                case 'cancelled':
-                    statusBadge = '<span class="badge bg-warning text-dark">Cancelled</span>';
-                    break;
-                default:
-                    statusBadge = `<span class="badge bg-secondary">${task.status}</span>`;
-            }
-            
-            return `
-            <a href="#" class="list-group-item list-group-item-action task-list-item" data-task-id="${task.id}">
-                <div class="d-flex w-100 justify-content-between">
-                    <h6 class="mb-1">Task ${task.id.substring(0, 8)}...</h6>
-                    ${statusBadge}
+                <div class="text-end">
+                    <small>${isInUse ? `任务: ${gpu.current_task}` : '空闲'}</small>
                 </div>
-                <p class="mb-1 small text-truncate">${task.params.prompt || 'No prompt'}</p>
-                <div class="d-flex w-100 justify-content-between align-items-center">
-                    <small class="text-muted">${formatTimestamp(task.created_at)}</small>
-                    ${task.status === 'running' ? `<div class="small">${task.progress}%</div>` : ''}
+            </div>
+            ${gpu.vram_used !== undefined ? `
+            <div class="mt-2">
+                <div class="d-flex justify-content-between small text-muted">
+                    <span>VRAM使用: ${gpu.vram_used}MB / ${gpu.vram_total}MB</span>
+                    <span>${usagePercent}%</span>
                 </div>
-                ${task.status === 'running' ? `
                 <div class="progress mt-1" style="height: 5px;">
-                    <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: ${task.progress}%"></div>
+                    <div class="progress-bar" role="progressbar" style="width: ${usagePercent}%"></div>
                 </div>
-                ` : ''}
-            </a>
-            `;
-        }
-        
-        function openTaskDetail(taskId) {
-            // Set current task ID
-            currentTaskId = taskId;
-            
-            // Show the task detail panel
-            document.getElementById('taskDetailPanel').style.display = 'block';
-            
-            // Fetch and display initial task info
-            fetchTaskDetail(taskId);
-            
-            // Set up periodic refresh
-            if (taskRefreshInterval) {
-                clearInterval(taskRefreshInterval);
-            }
-            taskRefreshInterval = setInterval(() => fetchTaskDetail(taskId), TASK_REFRESH_INTERVAL);
-        }
-        
-        function fetchTaskDetail(taskId) {
-            fetch(`/api/generate/task/${taskId}`)
-                .then(response => {
-                    if (!response.ok) {
-                        if (response.status === 404) {
-                            throw new Error('Task not found');
-                        }
-                        return response.json().then(data => {
-                            throw new Error(data.detail || 'Failed to fetch task details');
-                        });
-                    }
-                    return response.json();
-                })
-                .then(data => {
-                    updateTaskDetail(data);
-                })
-                .catch(error => {
-                    console.error(`Error fetching task ${taskId}:`, error);
-                    
-                    if (taskRefreshInterval && 
-                        (error.message.includes('not found'))) {
-                        // Task may have been deleted, stop refreshing
-                        clearInterval(taskRefreshInterval);
-                        taskRefreshInterval = null;
-                        showToast('Error', `Task ${taskId} not found`, 'error');
-                    }
-                });
-        }
-        
-        function updateTaskDetail(task) {
-            // Basic info
-            document.getElementById('detailTaskId').textContent = task.id;
-            document.getElementById('detailTaskType').textContent = task.type.toUpperCase();
-            
-            // Status
-            const statusEl = document.getElementById('detailTaskStatus');
-            statusEl.textContent = task.status.charAt(0).toUpperCase() + task.status.slice(1);
-            statusEl.className = 'badge';  // Reset class
-            
-            switch (task.status) {
-                case 'queued':
-                    statusEl.classList.add('bg-secondary');
-                    break;
-                case 'running':
-                    statusEl.classList.add('bg-primary');
-                    break;
-                case 'completed':
-                    statusEl.classList.add('bg-success');
-                    break;
-                case 'failed':
-                    statusEl.classList.add('bg-danger');
-                    break;
-                case 'cancelled':
-                    statusEl.classList.add('bg-warning', 'text-dark');
-                    break;
-                default:
-                    statusEl.classList.add('bg-secondary');
-            }
-            
-            // Timestamps
-            document.getElementById('detailTaskCreated').textContent = formatTimestamp(task.created_at);
-            document.getElementById('detailTaskStarted').textContent = formatTimestamp(task.started_at);
-            document.getElementById('detailTaskCompleted').textContent = formatTimestamp(task.completed_at);
-            
-            // Progress bar
-            const progressBar = document.getElementById('taskProgressBar').querySelector('.progress-bar');
-            progressBar.style.width = `${task.progress}%`;
-            progressBar.textContent = `${task.progress}%`;
-            
-            // Parameters
-            document.getElementById('detailTaskParams').textContent = JSON.stringify(task.params, null, 2);
-            
-            // Logs
-            const logsContainer = document.getElementById('detailTaskLogs');
-            if (task.logs && task.logs.length > 0) {
-                let logsHtml = '';
-                task.logs.forEach(log => {
-                    const logClass = `log-${log.level}`;
-                    const timestamp = new Date(log.time).toLocaleTimeString();
-                    logsHtml += `<p class="log-entry ${logClass}">[${timestamp}] ${log.message}</p>`;
-                });
-                logsContainer.innerHTML = logsHtml;
-                
-                // Scroll to bottom of logs if not scrolled up
-                if (logsContainer.scrollTop + logsContainer.clientHeight >= logsContainer.scrollHeight - 50) {
-                    logsContainer.scrollTop = logsContainer.scrollHeight;
+            </div>
+            ` : ''}
+            ${gpu.utilization !== undefined ? `
+            <div class="small text-muted mt-1">
+                利用率: ${gpu.utilization.toFixed(1)}%
+            </div>
+            ` : ''}
+        </div>
+        `;
+    });
+
+    gpuStatusEl.innerHTML = html;
+}
+
+// 更新队列状态
+function updateQueueStatus(queueData) {
+    const queueStatusEl = document.getElementById('queueStatus');
+    if (!queueData) {
+        queueStatusEl.innerHTML = '<p class="text-center">没有队列信息可用</p>';
+        return;
+    }
+
+    const html = `
+    <ul class="list-group">
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+            排队任务
+            <span class="badge bg-primary rounded-pill">${queueData.queue_length || 0}</span>
+        </li>
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+            运行中任务
+            <span class="badge bg-success rounded-pill">${queueData.running_tasks || 0}</span>
+        </li>
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+            已完成任务
+            <span class="badge bg-secondary rounded-pill">${queueData.completed_tasks || 0}</span>
+        </li>
+    </ul>
+    `;
+
+    queueStatusEl.innerHTML = html;
+}
+
+// 更新任务列表
+function updateTaskLists(queueData) {
+    // 排队任务
+    const queuedListEl = document.getElementById('queuedTasksList');
+    if (!queueData.queue || queueData.queue.length === 0) {
+        queuedListEl.innerHTML = '<div class="list-group-item text-center py-3">没有排队任务</div>';
+    } else {
+        let html = '';
+        queueData.queue.forEach(task => {
+            html += getTaskListItemHtml(task);
+        });
+        queuedListEl.innerHTML = html;
+    }
+
+    // 运行中任务
+    const runningListEl = document.getElementById('runningTasksList');
+    if (!queueData.running || queueData.running.length === 0) {
+        runningListEl.innerHTML = '<div class="list-group-item text-center py-3">没有运行中任务</div>';
+    } else {
+        let html = '';
+        queueData.running.forEach(task => {
+            html += getTaskListItemHtml(task);
+        });
+        runningListEl.innerHTML = html;
+    }
+
+    // 已完成任务
+    const completedListEl = document.getElementById('completedTasksList');
+    if (!queueData.recent_completed || queueData.recent_completed.length === 0) {
+        completedListEl.innerHTML = '<div class="list-group-item text-center py-3">没有已完成任务</div>';
+    } else {
+        let html = '';
+        queueData.recent_completed.forEach(task => {
+            html += getTaskListItemHtml(task);
+        });
+        completedListEl.innerHTML = html;
+    }
+
+    // 添加任务项点击事件
+    document.querySelectorAll('.task-list-item').forEach(item => {
+        item.addEventListener('click', function() {
+            const taskId = this.getAttribute('data-task-id');
+            openTaskDetail(taskId);
+        });
+    });
+}
+
+// 获取任务列表项的HTML
+function getTaskListItemHtml(task) {
+    let statusBadge = '';
+    switch (task.status) {
+        case 'queued':
+            statusBadge = '<span class="badge bg-secondary">排队中</span>';
+            break;
+        case 'running':
+            statusBadge = '<span class="badge bg-primary">运行中</span>';
+            break;
+        case 'completed':
+            statusBadge = '<span class="badge bg-success">已完成</span>';
+            break;
+        case 'failed':
+            statusBadge = '<span class="badge bg-danger">失败</span>';
+            break;
+        case 'cancelled':
+            statusBadge = '<span class="badge bg-warning text-dark">已取消</span>';
+            break;
+        default:
+            statusBadge = `<span class="badge bg-secondary">${task.status}</span>`;
+    }
+
+    return `
+    <a href="#" class="list-group-item list-group-item-action task-list-item" data-task-id="${task.id}">
+        <div class="d-flex w-100 justify-content-between">
+            <h6 class="mb-1">任务 ${task.id.substring(0, 8)}...</h6>
+            ${statusBadge}
+        </div>
+        <p class="mb-1 small text-truncate">${task.params && task.params.prompt ? task.params.prompt : '无提示词'}</p>
+        <div class="d-flex w-100 justify-content-between align-items-center">
+            <small class="text-muted">${formatTimestamp(task.created_at)}</small>
+            ${task.status === 'running' ? `<div class="small">${task.progress}%</div>` : ''}
+        </div>
+        ${task.status === 'running' ? `
+        <div class="progress mt-1" style="height: 5px;">
+            <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: ${task.progress}%"></div>
+        </div>
+        ` : ''}
+    </a>
+    `;
+}
+
+// 打开任务详情
+function openTaskDetail(taskId) {
+    // 设置当前任务ID
+    currentTaskId = taskId;
+
+    // 显示任务详情面板
+    document.getElementById('taskDetailPanel').style.display = 'block';
+
+    // 获取并显示初始任务信息
+    fetchTaskDetail(taskId);
+
+    // 设置定期刷新
+    if (taskRefreshInterval) {
+        clearInterval(taskRefreshInterval);
+    }
+    taskRefreshInterval = setInterval(() => fetchTaskDetail(taskId), TASK_REFRESH_INTERVAL);
+}
+
+// 获取任务详情
+function fetchTaskDetail(taskId) {
+    fetch(`/api/generate/task/${taskId}`)
+        .then(response => {
+            if (!response.ok) {
+                if (response.status === 404) {
+                    throw new Error('任务未找到');
                 }
-            } else {
-                logsContainer.innerHTML = '<p class="text-center text-muted">No logs available</p>';
+                return response.json().then(data => {
+                    throw new Error(data.detail || '获取任务详情失败');
+                });
             }
-            
-            // Result preview
-            const resultPreviewContainer = document.getElementById('resultPreviewContainer');
-            const downloadBtn = document.getElementById('downloadResultBtn');
-            
-            if (task.status === 'completed' && task.result && task.result.file_url) {
-                resultPreviewContainer.style.display = 'block';
-                const videoResult = document.getElementById('videoResult');
-                videoResult.src = task.result.file_url;
-                
-                // Download button
-                downloadBtn.style.display = 'inline-block';
-                downloadBtn.href = task.result.file_url;
-                downloadBtn.download = task.result.file_url.split('/').pop();
-            } else {
-                resultPreviewContainer.style.display = 'none';
-                downloadBtn.style.display = 'none';
-            }
-            
-            // Cancel button visibility
-            const cancelBtn = document.getElementById('cancelTaskBtn');
-            if (task.status === 'queued' || task.status === 'running') {
-                cancelBtn.style.display = 'inline-block';
-            } else {
-                cancelBtn.style.display = 'none';
-            }
-            
-            // Stop refreshing if task is complete/failed/cancelled
-            if (['completed', 'failed', 'cancelled'].includes(task.status) && taskRefreshInterval) {
+            return response.json();
+        })
+        .then(data => {
+            updateTaskDetail(data);
+        })
+        .catch(error => {
+            console.error(`获取任务 ${taskId} 出错:`, error);
+
+            if (taskRefreshInterval &&
+                (error.message.includes('未找到'))) {
+                // 任务可能已被删除，停止刷新
                 clearInterval(taskRefreshInterval);
                 taskRefreshInterval = null;
+                showToast('错误', `任务 ${taskId} 未找到`, 'error');
             }
+        });
+}
+
+// 更新任务详情
+function updateTaskDetail(task) {
+    // 基本信息
+    document.getElementById('detailTaskId').textContent = task.id;
+    document.getElementById('detailTaskType').textContent = task.type.toUpperCase();
+
+    // 状态
+    const statusEl = document.getElementById('detailTaskStatus');
+    statusEl.textContent = getStatusText(task.status);
+    statusEl.className = 'badge';  // 重置类
+
+    switch (task.status) {
+        case 'queued':
+            statusEl.classList.add('bg-secondary');
+            break;
+        case 'running':
+            statusEl.classList.add('bg-primary');
+            break;
+        case 'completed':
+            statusEl.classList.add('bg-success');
+            break;
+        case 'failed':
+            statusEl.classList.add('bg-danger');
+            break;
+        case 'cancelled':
+            statusEl.classList.add('bg-warning', 'text-dark');
+            break;
+        default:
+            statusEl.classList.add('bg-secondary');
+    }
+
+    // 时间戳
+    document.getElementById('detailTaskCreated').textContent = formatTimestamp(task.created_at);
+    document.getElementById('detailTaskStarted').textContent = formatTimestamp(task.started_at);
+    document.getElementById('detailTaskCompleted').textContent = formatTimestamp(task.completed_at);
+
+    // 进度条
+    const progressBar = document.getElementById('taskProgressBar').querySelector('.progress-bar');
+    progressBar.style.width = `${task.progress}%`;
+    progressBar.textContent = `${task.progress}%`;
+
+    // 参数
+    document.getElementById('detailTaskParams').textContent = JSON.stringify(task.params, null, 2);
+
+    // 日志
+    const logsContainer = document.getElementById('detailTaskLogs');
+    if (task.logs && task.logs.length > 0) {
+        let logsHtml = '';
+        task.logs.forEach(log => {
+            const logClass = `log-${log.level}`;
+            const timestamp = new Date(log.time).toLocaleTimeString();
+            logsHtml += `<p class="log-entry ${logClass}">[${timestamp}] ${log.message}</p>`;
+        });
+        logsContainer.innerHTML = logsHtml;
+
+        // 如果没有向上滚动，则滚动到日志底部
+        if (logsContainer.scrollTop + logsContainer.clientHeight >= logsContainer.scrollHeight - 50) {
+            logsContainer.scrollTop = logsContainer.scrollHeight;
         }
-        
-        function cancelTask(taskId) {
-            if (!confirm(`Are you sure you want to cancel task ${taskId}?`)) {
-                return;
-            }
-            
-            fetch(`/api/generate/task/${taskId}`, {
-                method: 'DELETE'
-            })
-            .then(response => {
-                if (!response.ok) {
-                    return response.json().then(data => {
-                        throw new Error(data.detail || 'Failed to cancel task');
-                    });
-                }
-                return response.json();
-            })
-            .then(data => {
-                if (data.status === 'cancelled') {
-                    showToast('Success', `Task ${taskId} cancelled successfully`);
-                    // Refresh task details
-                    fetchTaskDetail(taskId);
-                    // Refresh system status
-                    fetchSystemStatus();
-                } else {
-                    showToast('Warning', data.message || 'Task status is not cancelled', 'warning');
-                }
-            })
-            .catch(error => {
-                showToast('Error', `Failed to cancel task: ${error.message}`, 'error');
+    } else {
+        logsContainer.innerHTML = '<p class="text-center text-muted">没有可用日志</p>';
+    }
+
+    // 结果预览
+    const resultPreviewContainer = document.getElementById('resultPreviewContainer');
+    const downloadBtn = document.getElementById('downloadResultBtn');
+
+    if (task.status === 'completed' && task.result && task.result.file_url) {
+        resultPreviewContainer.style.display = 'block';
+        const videoResult = document.getElementById('videoResult');
+        videoResult.src = task.result.file_url;
+
+        // 下载按钮
+        downloadBtn.style.display = 'inline-block';
+        downloadBtn.href = task.result.file_url;
+        downloadBtn.download = task.result.file_url.split('/').pop();
+    } else {
+        resultPreviewContainer.style.display = 'none';
+        downloadBtn.style.display = 'none';
+    }
+
+    // 取消按钮可见性
+    const cancelBtn = document.getElementById('cancelTaskBtn');
+    if (task.status === 'queued' || task.status === 'running') {
+        cancelBtn.style.display = 'inline-block';
+    } else {
+        cancelBtn.style.display = 'none';
+    }
+
+    // 如果任务完成/失败/取消，停止刷新
+    if (['completed', 'failed', 'cancelled'].includes(task.status) && taskRefreshInterval) {
+        clearInterval(taskRefreshInterval);
+        taskRefreshInterval = null;
+    }
+}
+
+// 获取状态文本
+function getStatusText(status) {
+    switch (status) {
+        case 'queued': return '排队中';
+        case 'running': return '运行中';
+        case 'completed': return '已完成';
+        case 'failed': return '失败';
+        case 'cancelled': return '已取消';
+        default: return status;
+    }
+}
+
+// 取消任务
+function cancelTask(taskId) {
+    if (!confirm(`确定要取消任务 ${taskId} 吗?`)) {
+        return;
+    }
+
+    fetch(`/api/generate/task/${taskId}`, {
+        method: 'DELETE'
+    })
+    .then(response => {
+        if (!response.ok) {
+            return response.json().then(data => {
+                throw new Error(data.detail || '取消任务失败');
             });
         }
+        return response.json();
+    })
+    .then(data => {
+        if (data.status === 'cancelled') {
+            showToast('成功', `任务 ${taskId} 已成功取消`);
+            // 刷新任务详情
+            fetchTaskDetail(taskId);
+            // 刷新系统状态
+            fetchSystemStatus();
+        } else {
+            showToast('警告', data.message || '任务状态未被取消', 'warning');
+        }
+    })
+    .catch(error => {
+        showToast('错误', `取消任务失败: ${error.message}`, 'error');
+    });
+}
     </script>
 </body>
 </html>

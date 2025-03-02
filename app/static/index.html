@@ -510,18 +510,30 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        // Global variables
-        let currentTaskId = null;
+// Replace the script section in app/static/index.html with this version
+
+<script>
+// Global variables
+let currentTaskId = null;
 let taskRefreshInterval = null;
 let systemRefreshInterval = null;
+let clientId = null; // Add client ID variable
 const SYSTEM_REFRESH_INTERVAL = 5000; // 5秒
 const TASK_REFRESH_INTERVAL = 2000;   // 2秒
 
-// 初始化tooltips
+// Initialize client ID and add to requests
 document.addEventListener('DOMContentLoaded', function() {
+    // Initialize tooltips
     const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
     const tooltipList = [...tooltipTriggerList].map(tooltipTriggerEl => new bootstrap.Tooltip(tooltipTriggerEl));
+
+    // Generate a client ID if it doesn't exist
+    clientId = localStorage.getItem('clientId');
+    if (!clientId) {
+        clientId = 'client_' + Math.random().toString(36).substring(2, 15);
+        localStorage.setItem('clientId', clientId);
+    }
+    console.log("Using client ID:", clientId);
 
     // 图片预览
     document.getElementById('i2vImage').addEventListener('change', function(e) {
@@ -577,7 +589,7 @@ document.addEventListener('DOMContentLoaded', function() {
     console.log("页面加载，开始初次获取系统状态");
 
     // 先简单获取一下系统状态检查API是否正常工作
-    fetch('/api/status/system')
+    fetch('/api/status/system', addClientIdHeader())
         .then(response => {
             console.log("Initial API check - response status:", response.status);
             if (!response.ok) {
@@ -623,6 +635,15 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
 });
+
+// Function to add client ID header to fetch options
+function addClientIdHeader(options = {}) {
+    if (!options.headers) {
+        options.headers = {};
+    }
+    options.headers['X-Client-ID'] = clientId;
+    return options;
+}
 
 // 显示通知提示
 function showToast(title, message, type = 'success') {
@@ -679,13 +700,13 @@ function submitT2VForm() {
     submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 提交中...';
     submitBtn.disabled = true;
 
-    fetch('/api/generate/t2v', {
+    fetch('/api/generate/t2v', addClientIdHeader({
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
         },
         body: JSON.stringify(formData)
-    })
+    }))
     .then(response => {
         if (!response.ok) {
             return response.json().then(data => {
@@ -703,7 +724,11 @@ function submitT2VForm() {
         fetchSystemStatus();
     })
     .catch(error => {
-        showToast('错误', `提交任务失败: ${error.message}`, 'error');
+        if (error.message.includes('Task limit reached') || error.message.includes('maximum number of concurrent tasks')) {
+            showToast('错误', `您已达到同时运行任务的上限`, 'error');
+        } else {
+            showToast('错误', `提交任务失败: ${error.message}`, 'error');
+        }
     })
     .finally(() => {
         // 重新启用提交按钮
@@ -744,10 +769,16 @@ function submitI2VForm() {
     submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 提交中...';
     submitBtn.disabled = true;
 
-    fetch('/api/generate/i2v', {
+    // Add client ID header for form data
+    const options = {
         method: 'POST',
-        body: formData
-    })
+        body: formData,
+        headers: {
+            'X-Client-ID': clientId
+        }
+    };
+
+    fetch('/api/generate/i2v', options)
     .then(response => {
         if (!response.ok) {
             return response.json().then(data => {
@@ -765,7 +796,11 @@ function submitI2VForm() {
         fetchSystemStatus();
     })
     .catch(error => {
-        showToast('错误', `提交任务失败: ${error.message}`, 'error');
+        if (error.message.includes('Task limit reached') || error.message.includes('maximum number of concurrent tasks')) {
+            showToast('错误', `您已达到同时运行任务的上限`, 'error');
+        } else {
+            showToast('错误', `提交任务失败: ${error.message}`, 'error');
+        }
     })
     .finally(() => {
         // 重新启用提交按钮
@@ -778,7 +813,7 @@ function submitI2VForm() {
 function fetchSystemStatus() {
     console.log("开始获取系统状态...");
 
-    return fetch('/api/status/system')
+    return fetch('/api/status/system', addClientIdHeader())
         .then(response => {
             console.log("系统状态响应码:", response.status);
 
@@ -1006,11 +1041,14 @@ function openTaskDetail(taskId) {
 
 // 获取任务详情
 function fetchTaskDetail(taskId) {
-    fetch(`/api/generate/task/${taskId}`)
+    fetch(`/api/generate/task/${taskId}`, addClientIdHeader())
         .then(response => {
             if (!response.ok) {
                 if (response.status === 404) {
                     throw new Error('任务未找到');
+                }
+                if (response.status === 403) {
+                    throw new Error('没有权限查看此任务');
                 }
                 return response.json().then(data => {
                     throw new Error(data.detail || '获取任务详情失败');
@@ -1025,11 +1063,15 @@ function fetchTaskDetail(taskId) {
             console.error(`获取任务 ${taskId} 出错:`, error);
 
             if (taskRefreshInterval &&
-                (error.message.includes('未找到'))) {
-                // 任务可能已被删除，停止刷新
+                (error.message.includes('未找到') || error.message.includes('没有权限'))) {
+                // 任务可能已被删除或无权访问，停止刷新
                 clearInterval(taskRefreshInterval);
                 taskRefreshInterval = null;
-                showToast('错误', `任务 ${taskId} 未找到`, 'error');
+                showToast('错误', error.message, 'error');
+
+                // 关闭任务详情面板
+                document.getElementById('taskDetailPanel').style.display = 'none';
+                currentTaskId = null;
             }
         });
 }
@@ -1148,9 +1190,9 @@ function cancelTask(taskId) {
         return;
     }
 
-    fetch(`/api/generate/task/${taskId}`, {
+    fetch(`/api/generate/task/${taskId}`, addClientIdHeader({
         method: 'DELETE'
-    })
+    }))
     .then(response => {
         if (!response.ok) {
             return response.json().then(data => {
@@ -1174,8 +1216,9 @@ function cancelTask(taskId) {
         showToast('错误', `取消任务失败: ${error.message}`, 'error');
     });
 }
+
 function refreshTaskProgress(taskId) {
-    fetch(`/api/generate/task/${taskId}/progress`)
+    fetch(`/api/generate/task/${taskId}/progress`, addClientIdHeader())
         .then(response => {
             if (!response.ok) {
                 throw new Error('无法获取进度信息');
@@ -1193,10 +1236,10 @@ function refreshTaskProgress(taskId) {
         });
 }
 
-// 每200毫秒刷新一次进度
+// 每秒刷新一次进度
 function startProgressRefresh(taskId) {
     return setInterval(() => refreshTaskProgress(taskId), 1000);
 }
-    </script>
+</script>
 </body>
 </html>

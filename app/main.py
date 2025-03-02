@@ -16,57 +16,59 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
+
 # 获取项目关键路径
 def get_project_paths():
     """获取项目的关键路径"""
     # 确定当前文件的目录
     current_file_dir = os.path.dirname(os.path.abspath(__file__))
-    
+
     # 如果在app目录下直接运行，current_file_dir就是app目录
     app_dir = current_file_dir
-    
+
     # 项目根目录是app目录的父目录
     project_root = os.path.dirname(app_dir)
-    
+
     # 静态文件目录
     static_dir = os.path.join(app_dir, "static")
-    
+
     # 确保静态目录存在
     os.makedirs(static_dir, exist_ok=True)
-    
+
     # 静态文件的完整路径
     index_html_path = os.path.join(static_dir, "index.html")
-    
+
     # 视频输出目录
     videos_dir = os.path.join(static_dir, "videos")
     os.makedirs(videos_dir, exist_ok=True)
-    
+
     # 日志和任务目录
     logs_dir = os.path.join(project_root, "logs")
     tasks_dir = os.path.join(project_root, "tasks")
-    
+
     os.makedirs(logs_dir, exist_ok=True)
     os.makedirs(tasks_dir, exist_ok=True)
-    
+
     return {
         "app_dir": app_dir,
         "project_root": project_root,
         "static_dir": static_dir,
         "index_html_path": index_html_path,
         "videos_dir": videos_dir,
-        "logs_dir": logs_dir, 
+        "logs_dir": logs_dir,
         "tasks_dir": tasks_dir
     }
+
 
 # 使用绝对导入
 from app.api import api_router
 from app.core.config import settings
 from app.core.logging import setup_app_logger
 from app.core.gpu_manager import gpu_manager
-from app.services.task_queue import task_queue
+from app.services.task_queue import TaskQueue, task_queue
 
 
-def create_app(debug=False):
+def create_app(debug=False, task_per_user=2):
     # 设置路径
     paths = get_project_paths()
 
@@ -74,6 +76,7 @@ def create_app(debug=False):
     logger = setup_app_logger(debug=debug)
     logger.info("Initializing Wan2.1 Video Generation Platform")
     logger.info(f"Debug mode: {debug}")
+    logger.info(f"Tasks per user: {task_per_user}")
     logger.info(f"Project paths: {paths}")
     logger.info(f"Available GPUs: {[gpu.device_id for gpu in settings.gpu_devices]}")
 
@@ -82,15 +85,19 @@ def create_app(debug=False):
         if path_name.endswith('_dir'):
             os.makedirs(path, exist_ok=True)
             logger.debug(f"Directory created/verified: {path}")
-    
+
     # 更新settings中的输出目录
     settings.output_dir = paths["videos_dir"]
     logger.info(f"Output directory set to: {settings.output_dir}")
-    
+
+    # Initialize task queue with per-user limit
+    global task_queue
+    task_queue = TaskQueue(max_size=settings.max_queue_size, max_tasks_per_client=task_per_user)
+
     # 检查index.html文件
     if not os.path.exists(paths["index_html_path"]):
         logger.warning(f"Index file not found at expected path: {paths['index_html_path']}")
-        
+
         # 尝试在源码目录中找到示例index.html并复制过去
         source_html = os.path.join(current_dir, "static", "index.html.example")
         if os.path.exists(source_html):
@@ -101,7 +108,7 @@ def create_app(debug=False):
             logger.warning("No example index.html found, will generate basic HTML page on request")
     else:
         logger.info(f"Found index.html at: {paths['index_html_path']}")
-    
+
     # Create FastAPI app
     app = FastAPI(
         title=settings.api_title,
@@ -109,7 +116,7 @@ def create_app(debug=False):
         version=settings.api_version,
         debug=debug
     )
-    
+
     # Configure CORS
     app.add_middleware(
         CORSMiddleware,
@@ -119,7 +126,7 @@ def create_app(debug=False):
         allow_headers=["*"],
         expose_headers=["Content-Disposition"]
     )
-    
+
     # Error handling
     @app.exception_handler(Exception)
     async def global_exception_handler(request, exc):
@@ -128,7 +135,7 @@ def create_app(debug=False):
             status_code=500,
             content={"detail": f"Internal server error: {str(exc)}"}
         )
-    
+
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request, exc):
         logger.warning(f"HTTP exception: {exc.status_code} - {exc.detail}")
@@ -136,7 +143,7 @@ def create_app(debug=False):
             status_code=exc.status_code,
             content={"detail": exc.detail}
         )
-    
+
     # Cleanup old files
     @app.on_event("startup")
     def cleanup_old_files():
@@ -146,7 +153,7 @@ def create_app(debug=False):
             if video_dir.exists():
                 video_files = list(video_dir.glob("*.mp4")) + list(video_dir.glob("*.png"))
                 video_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-                
+
                 if len(video_files) > 100:
                     for old_file in video_files[100:]:
                         try:
@@ -154,20 +161,20 @@ def create_app(debug=False):
                             logger.debug(f"Cleaned up old output file: {old_file}")
                         except Exception as e:
                             logger.error(f"Failed to delete old file {old_file}: {str(e)}")
-            
+
             logger.info("Startup cleanup completed")
         except Exception as e:
             logger.error(f"Error during startup cleanup: {str(e)}")
-    
+
     # Mount static files
     app.mount("/static", StaticFiles(directory=paths["static_dir"]), name="static")
-    
+
     # Serve index.html for root path
     @app.get("/")
     async def read_index():
         if not os.path.exists(paths["index_html_path"]):
             logger.error(f"Index file not found at {paths['index_html_path']}")
-            
+
             # 如果找不到，返回一个简单的HTML页面
             html_content = """
             <!DOCTYPE html>
@@ -210,20 +217,21 @@ def create_app(debug=False):
             </html>
             """
             return HTMLResponse(content=html_content)
-        
+
         return FileResponse(paths["index_html_path"])
-    
+
     # Include API routes
     app.include_router(api_router, prefix="/api")
-    
+
     # Shutdown event
     @app.on_event("shutdown")
     def shutdown_event():
         logger.info("Shutting down application")
         task_queue.stop_worker()
         gpu_manager.stop_monitoring()
-    
+
     return app
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Wan2.1 Video Generation Platform")
@@ -231,25 +239,28 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8000, help="Port to listen on")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     parser.add_argument("--reload", action="store_true", help="Enable auto reload")
+    parser.add_argument("--task_per_user", type=int, default=2, help="Maximum tasks per user")
     return parser.parse_args()
+
 
 if __name__ == "__main__":
     args = parse_args()
-    
-    # 直接运行app实例，不使用工厂函数
-    app = create_app(debug=args.debug)
-    
+
+    # Pass the task_per_user parameter
+    app = create_app(debug=args.debug, task_per_user=args.task_per_user)
+
     # 输出启动信息
     paths = get_project_paths()
     print(f"Starting server on http://{args.host}:{args.port}")
     print(f"Static files directory: {paths['static_dir']}")
     print(f"API documentation: http://{args.host}:{args.port}/docs")
-    
+    print(f"Maximum tasks per user: {args.task_per_user}")
+
     # 检查index.html是否存在
     if not os.path.exists(paths["index_html_path"]):
         print(f"Warning: index.html not found at {paths['index_html_path']}")
         print("A basic HTML page will be generated instead.")
-    
+
     # 启动服务器
     uvicorn.run(
         app,

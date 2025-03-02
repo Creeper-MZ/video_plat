@@ -64,15 +64,15 @@ class GPUManager:
 
     def _get_gpu_stats(self) -> List[Dict]:
         """
-        Get GPU statistics using nvidia-smi command
-        Returns a list of dictionaries with GPU stats
+        获取 GPU 统计信息的改进版本
         """
         try:
-            # Run nvidia-smi to get GPU stats
+            # 运行 nvidia-smi 获取 GPU 统计信息
+            logger.debug("Running nvidia-smi to get GPU stats")
             result = subprocess.run(
                 [
                     "nvidia-smi",
-                    "--query-gpu=index,memory.used,memory.total,utilization.gpu",
+                    "--query-gpu=index,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw,power.limit",
                     "--format=csv,noheader,nounits"
                 ],
                 capture_output=True,
@@ -80,38 +80,29 @@ class GPUManager:
                 check=True
             )
 
-            # Parse the output
+            # 解析输出
             gpu_stats = []
             for line in result.stdout.strip().split("\n"):
                 parts = line.split(", ")
-                if len(parts) >= 4:
+                if len(parts) >= 7:  # 现在我们有 7 个参数
                     try:
                         gpu_stats.append({
                             "index": int(parts[0]),
                             "memory_used": int(parts[1]),
                             "memory_total": int(parts[2]),
-                            "utilization": float(parts[3])
+                            "utilization": float(parts[3]),
+                            "temperature": float(parts[4]),
+                            "power_draw": float(parts[5]),
+                            "power_limit": float(parts[6])
                         })
+                        logger.debug(
+                            f"GPU {parts[0]} stats: {parts[1]}MB/{parts[2]}MB, util: {parts[3]}%, temp: {parts[4]}°C")
                     except (ValueError, TypeError) as e:
                         logger.warning(f"Error parsing GPU stat line: {line}. Error: {e}")
 
             return gpu_stats
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to run nvidia-smi: {str(e)}")
-            # If nvidia-smi fails but we know GPUs exist, return dummy stats
-            if len(self.devices) > 0:
-                return [
-                    {
-                        "index": i,
-                        "memory_used": 0,
-                        "memory_total": getattr(d, "vram", 49140),  # Default to 48GB
-                        "utilization": 0.0
-                    }
-                    for i, d in enumerate(self.devices)
-                ]
-            return []
         except Exception as e:
-            logger.error(f"Unexpected error getting GPU stats: {str(e)}")
+            logger.error(f"Error getting GPU stats: {str(e)}")
             return []
     
     def allocate_gpu(self, task_id: str, required_memory: int = 40000) -> Optional[int]:

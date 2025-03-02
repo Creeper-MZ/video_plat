@@ -27,18 +27,32 @@ class ProgressHandler:
         self.total_steps = 0
         self.status = "initializing"
         self.last_progress_time = time.time()
-    
+        self.start_time = time.time()
+
     def update(self, step, total):
         self.current_step = step
         self.total_steps = total
-        
+
         # Update task progress
         self.task.update_progress(step, total)
-        
-        # Log progress less frequently (every 5% or at least 2 seconds)
+
+        # Calculate ETA
         current_time = time.time()
-        if current_time - self.last_progress_time >= 2.0 or step == 0 or step >= total or step % max(1, int(total * 0.05)) == 0:
-            self.task.logger.info(f"Generation progress: {step}/{total} steps ({int(step/total*100)}%)")
+        elapsed = current_time - self.start_time
+
+        if step > 0:
+            steps_per_second = step / elapsed
+            remaining_steps = total - step
+            eta_seconds = remaining_steps / steps_per_second if steps_per_second > 0 else 0
+            eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
+        else:
+            eta_str = "unknown"
+
+        # Log progress less frequently
+        if current_time - self.last_progress_time >= 2.0 or step == 0 or step >= total or step % max(1,
+                                                                                                     int(total * 0.05)) == 0:
+            progress_percent = int(step / total * 100)
+            self.task.logger.info(f"Generation progress: {step}/{total} steps ({progress_percent}%) - ETA: {eta_str}")
             self.last_progress_time = current_time
 
 
@@ -168,9 +182,15 @@ class VideoGenerator:
                 }
         else:
             raise ValueError(f"Unsupported task type: {task_type}")
-    
+
     def _generate_t2v(self, model_config, width, height):
         """Generate video from text"""
+        self.logger.info("Starting text-to-video generation")
+        self.logger.info(f"Loading models from {model_config['model_path']}")
+        self.logger.info(
+            f"Generation parameters: Resolution: {width}x{height}, Frames: {self.params.get('num_frames')}, Steps: {self.params.get('steps')}")
+
+        # 其余代码保持不变...
         # Initialize progress handler
         progress_handler = ProgressHandler(self.task)
         

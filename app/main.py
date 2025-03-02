@@ -65,20 +65,23 @@ from app.core.logging import setup_app_logger
 from app.core.gpu_manager import gpu_manager
 from app.services.task_queue import task_queue
 
+
 def create_app(debug=False):
-    # 获取路径
+    # 设置路径
     paths = get_project_paths()
-    
-    # Setup logging
+
+    # 设置日志
     logger = setup_app_logger(debug=debug)
     logger.info("Initializing Wan2.1 Video Generation Platform")
+    logger.info(f"Debug mode: {debug}")
     logger.info(f"Project paths: {paths}")
-    
-    # 确保必要的目录存在
+    logger.info(f"Available GPUs: {[gpu.device_id for gpu in settings.gpu_devices]}")
+
+    # 确保目录存在
     for path_name, path in paths.items():
         if path_name.endswith('_dir'):
             os.makedirs(path, exist_ok=True)
-            logger.info(f"Ensured directory exists: {path}")
+            logger.debug(f"Directory created/verified: {path}")
     
     # 更新settings中的输出目录
     settings.output_dir = paths["videos_dir"]

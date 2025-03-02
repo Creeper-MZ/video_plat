@@ -38,7 +38,7 @@ class GPUManager:
             self._monitoring_thread.join(timeout=2.0)
             self._monitoring_thread = None
             logger.info("GPU monitoring stopped")
-    
+
     def _monitor_gpus(self):
         """Background thread that periodically checks GPU utilization and memory"""
         logger.info("GPU monitoring thread started")
@@ -48,18 +48,20 @@ class GPUManager:
                 with self.lock:
                     for i, device in enumerate(self.devices):
                         if i < len(gpu_stats):
-                            # Update device stats using setattr to avoid validation errors
-                            setattr(device, "vram_used", gpu_stats[i]["memory_used"])
-                            setattr(device, "vram_total", gpu_stats[i]["memory_total"])
-                            setattr(device, "utilization", gpu_stats[i]["utilization"])
-                
-                logger.debug(f"Updated GPU stats: {[{d.device_id: {'used': getattr(d, 'vram_used', 0), 'total': getattr(d, 'vram_total', 0), 'util': getattr(d, 'utilization', 0)}} for d in self.devices]}")
+                            # Update device stats safely using getattr with defaults
+                            setattr(device, "vram_used", gpu_stats[i].get("memory_used", 0))
+                            setattr(device, "vram_total", gpu_stats[i].get("memory_total", 49140))
+                            setattr(device, "utilization", gpu_stats[i].get("utilization", 0.0))
+
+                    # Log the updated stats
+                    logger.debug(
+                        f"Updated GPU stats: {[{d.device_id: {'used': getattr(d, 'vram_used', 0), 'total': getattr(d, 'vram_total', 0), 'util': getattr(d, 'utilization', 0)}} for d in self.devices]}")
             except Exception as e:
                 logger.error(f"Error monitoring GPUs: {str(e)}")
-            
+
             # Sleep for 5 seconds before next update
             time.sleep(5)
-    
+
     def _get_gpu_stats(self) -> List[Dict]:
         """
         Get GPU statistics using nvidia-smi command
@@ -69,37 +71,47 @@ class GPUManager:
             # Run nvidia-smi to get GPU stats
             result = subprocess.run(
                 [
-                    "nvidia-smi", 
-                    "--query-gpu=index,memory.used,memory.total,utilization.gpu", 
+                    "nvidia-smi",
+                    "--query-gpu=index,memory.used,memory.total,utilization.gpu",
                     "--format=csv,noheader,nounits"
                 ],
                 capture_output=True,
                 text=True,
                 check=True
             )
-            
+
             # Parse the output
             gpu_stats = []
             for line in result.stdout.strip().split("\n"):
                 parts = line.split(", ")
                 if len(parts) >= 4:
-                    gpu_stats.append({
-                        "index": int(parts[0]),
-                        "memory_used": int(parts[1]),
-                        "memory_total": int(parts[2]),
-                        "utilization": float(parts[3])
-                    })
-            
+                    try:
+                        gpu_stats.append({
+                            "index": int(parts[0]),
+                            "memory_used": int(parts[1]),
+                            "memory_total": int(parts[2]),
+                            "utilization": float(parts[3])
+                        })
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Error parsing GPU stat line: {line}. Error: {e}")
+
             return gpu_stats
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to run nvidia-smi: {str(e)}")
             # If nvidia-smi fails but we know GPUs exist, return dummy stats
             if len(self.devices) > 0:
-                return [{"index": i, "memory_used": 0, "memory_total": getattr(d, "vram", 0), "utilization": 0} 
-                        for i, d in enumerate(self.devices)]
+                return [
+                    {
+                        "index": i,
+                        "memory_used": 0,
+                        "memory_total": getattr(d, "vram", 49140),  # Default to 48GB
+                        "utilization": 0.0
+                    }
+                    for i, d in enumerate(self.devices)
+                ]
             return []
         except Exception as e:
-            logger.error(f"Failed to get GPU stats: {str(e)}")
+            logger.error(f"Unexpected error getting GPU stats: {str(e)}")
             return []
     
     def allocate_gpu(self, task_id: str, required_memory: int = 40000) -> Optional[int]:
@@ -158,30 +170,33 @@ class GPUManager:
             
             logger.error(f"GPU {device_id} not found or not allocated to task {task_id}")
             return False
-    
+
     def get_gpu_status(self) -> List[Dict]:
+        """
+        Get the current status of all GPUs
+
+        Returns:
+            List of dictionaries with GPU status information
+        """
         with self.lock:
             status = []
             for device in self.devices:
-                try:
-                    device_status = {
-                        "device_id": device.device_id,
-                        "available": device.available,
-                        "current_task": device.current_task
-                    }
-                    
-                    # Safely get VRAM info with default values
-                    device_status.update({
-                        "vram_used": getattr(device, 'vram_used', 0),
-                        "vram_total": getattr(device, 'vram_total', 0),
-                        "vram_free": max(0, getattr(device, 'vram_total', 0) - getattr(device, 'vram_used', 0)),
-                        "utilization": getattr(device, 'utilization', 0.0)
-                    })
-                    
-                    status.append(device_status)
-                except Exception as e:
-                    logger.error(f"Error processing GPU {device.device_id} status: {str(e)}")
-            
+                device_status = {
+                    "device_id": device.device_id,
+                    "available": device.available,
+                    "current_task": device.current_task
+                }
+
+                # Add utilization info with safe defaults
+                device_status.update({
+                    "vram_used": getattr(device, 'vram_used', 0),
+                    "vram_total": getattr(device, 'vram_total', 49140),
+                    "vram_free": max(0, getattr(device, 'vram_total', 49140) - getattr(device, 'vram_used', 0)),
+                    "utilization": getattr(device, 'utilization', 0.0)
+                })
+
+                status.append(device_status)
+
             return status
 
 # Create a singleton instance

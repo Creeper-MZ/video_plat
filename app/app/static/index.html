@@ -571,35 +571,49 @@
         
         // Initialize page
         document.addEventListener('DOMContentLoaded', function() {
-            // Show loading modal
-            const loadingModal = new bootstrap.Modal(document.getElementById('loadingModal'));
-            loadingModal.show();
-            
-            // Fetch initial system status
-            fetchSystemStatus()
-                .then(() => {
-                    // Hide loading modal after data is loaded
-                    loadingModal.hide();
-                })
-                .catch(error => {
-                    document.getElementById('loadingModalText').textContent = 'Connection Error';
-                    document.getElementById('loadingModalSubtext').textContent = 
-                        'Could not connect to the server. Please check your connection and refresh the page.';
-                    
-                    // Add a retry button
-                    const modalBody = document.querySelector('#loadingModal .modal-body');
-                    const retryBtn = document.createElement('button');
-                    retryBtn.className = 'btn btn-primary mt-3';
-                    retryBtn.textContent = 'Retry Connection';
-                    retryBtn.onclick = function() {
-                        location.reload();
-                    };
-                    modalBody.appendChild(retryBtn);
-                });
-            
+    // Show loading modal
+    const loadingModal = new bootstrap.Modal(document.getElementById('loadingModal'));
+    loadingModal.show();
+
+    // Fetch initial system status
+    fetchSystemStatus()
+        .then(() => {
+            // Hide loading modal after data is loaded
+            console.log("Initial status loaded successfully, hiding modal");
+            loadingModal.hide();
+        })
+        .catch(error => {
+            console.error("Error during initial status load:", error);
+
+            // 即使出错也修改对话框内容并添加重试按钮
+            document.getElementById('loadingModalText').textContent = 'Connection Error';
+            document.getElementById('loadingModalSubtext').textContent =
+                'Could not connect to the server. Please check your connection and refresh the page.';
+
+            // Add a retry button
+            const modalBody = document.querySelector('#loadingModal .modal-body');
+
+            // 检查是否已经添加了按钮，避免重复添加
+            if (!modalBody.querySelector('button')) {
+                const retryBtn = document.createElement('button');
+                retryBtn.className = 'btn btn-primary mt-3';
+                retryBtn.textContent = 'Retry Connection';
+                retryBtn.onclick = function() {
+                    location.reload();
+                };
+                modalBody.appendChild(retryBtn);
+            }
+
+            // 不要在这里关闭对话框，让用户选择重试
+        })
+        .finally(() => {
             // Set up periodic refresh for system status
+            if (systemRefreshInterval) {
+                clearInterval(systemRefreshInterval);
+            }
             systemRefreshInterval = setInterval(fetchSystemStatus, SYSTEM_REFRESH_INTERVAL);
         });
+});
         
         // Helper functions
         function showToast(title, message, type = 'success') {
@@ -748,35 +762,52 @@
             });
         }
         
-        function fetchSystemStatus() {
+function fetchSystemStatus() {
     // Fetch GPU and queue status
+    console.log("Fetching system status...");
+
     return fetch('/api/status/system')
         .then(response => {
+            console.log("Response status:", response.status);
+
             if (!response.ok) {
-                // Log the full response for debugging
+                // 记录详细错误信息
                 return response.text().then(errorText => {
-                    console.error('Detailed error:', errorText);
+                    console.error('Server error response:', errorText);
                     throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
                 });
             }
-            return response.json();
+
+            return response.json().then(data => {
+                console.log("Received system status data:", data);
+                return data;
+            });
         })
         .then(data => {
+            // 验证数据结构
+            if (!data) {
+                console.error("Received empty data from server");
+                throw new Error("Empty response data");
+            }
+
             updateGPUStatus(data.gpus || []);
             updateQueueStatus(data.queue || {});
             updateTaskLists(data.queue || {});
+
+            console.log("System status updated successfully");
             return data;
         })
         .catch(error => {
-            console.error('Comprehensive error fetching system status:', error);
-            // Add more detailed error logging
+            console.error('Error fetching system status:', error);
             const errorMessage = error.message || 'Unknown error';
             showToast('Error', `Failed to update system status: ${errorMessage}`, 'error');
-            
-            // Provide a more informative error message
-            document.getElementById('loadingModalText').textContent = 'Connection Error';
-            document.getElementById('loadingModalSubtext').textContent = 
-                `Could not connect to the server. Error: ${errorMessage}. Please check the server status.`;
+
+            // 这里不要重复显示 loadingModal，因为它可能已经显示了
+            if (document.getElementById('loadingModal')) {
+                document.getElementById('loadingModalText').textContent = 'Connection Error';
+                document.getElementById('loadingModalSubtext').textContent =
+                    `Could not connect to the server. Error: ${errorMessage}. Please check the server status.`;
+            }
             
             throw error;
         });

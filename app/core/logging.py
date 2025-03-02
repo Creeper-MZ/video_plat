@@ -71,6 +71,7 @@ class TaskLogger:
         self.status = "error"
         return message
 
+    # 在 core/logging.py 中
     def update_progress(self, current_step: int, total_steps: int):
         """Update task progress"""
         if total_steps > 0:
@@ -84,8 +85,8 @@ class TaskLogger:
         # 记录一条日志
         self.info(f"Progress: {self.progress}% ({current_step}/{total_steps})")
 
-        # 确保任务信息保存到磁盘
-        self._save_task_info()
+        # 移除对不存在方法的调用
+        # self._save_task_info()
 
         return self.progress
     

@@ -366,7 +366,8 @@ class VideoGenerator:
                         else:
                             self.logger.warning(f"进度信息格式不匹配: {line.strip()}")
                     except Exception as e:
-                        self.logger.error(f"Error parsing progress: {str(e)}", exc_info=True)
+                        # 移除 exc_info=True 参数
+                        self.logger.error(f"Error parsing progress: {str(e)}")
                 else:
                     self.logger.info(f"Process stderr: {line.strip()}")
 

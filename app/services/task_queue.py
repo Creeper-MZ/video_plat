@@ -73,11 +73,14 @@ class Task:
             self.completed_at = datetime.now()
         
         self._save_task_info()
-    
+
+    # 在 Task 类中
     def update_progress(self, current_step: int, total_steps: int):
         """Update task progress"""
         self.progress = self.logger.update_progress(current_step, total_steps)
+        # 自己保存任务信息
         self._save_task_info()
+        return self.progress
     
     def assign_gpu(self, gpu_id: int):
         """Assign a GPU to this task"""
